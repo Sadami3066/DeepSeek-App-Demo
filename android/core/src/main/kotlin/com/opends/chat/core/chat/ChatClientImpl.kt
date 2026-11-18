@@ -70,8 +70,6 @@ internal class ChatClientImpl(
         if (text.isEmpty() && input.attachments.isEmpty()) throw userError("请输入内容")
         val session = store.getSession(sessionId) ?: throw userError("会话不存在")
         ComposerLimits.validateText(text)?.let { throw userError(it) }
-        ComposerLimits.validateSearchWithFiles(input.searchEnabled, input.attachments.isNotEmpty())
-            ?.let { throw userError(it) }
         ComposerLimits.validateFileCount(input.attachments.size)?.let { throw userError(it) }
         input.attachments.firstOrNull { it.size > 0 }?.let { attachment ->
             ComposerLimits.validateFileSize(attachment.size)?.let { throw userError(it) }
@@ -122,7 +120,7 @@ internal class ChatClientImpl(
             settleSetupError(sessionId, assistantId, error.message ?: "上传失败")
             throw error
         }
-        val titleEnabled = session.title.isNullOrEmpty() && path.none { it.role == Role.ASSISTANT }
+        val titleEnabled = session.title.isNullOrEmpty()
         val setup = StreamSetup(
             sessionId = sessionId,
             assistantId = assistantId,
@@ -399,7 +397,6 @@ internal class ChatClientImpl(
             prefixBlocks = setup.prefixBlocks,
             includeThinking = setup.thinkingEnabled,
         )
-        val body = buildRequestBody(messages, setup.thinkingEnabled, setup.searchEnabled, setup.titleEnabled)
         val needsBeta = messages.toString().contains("\"file_id\"")
         generationState.value = GenerationState.Streaming(
             sessionId = setup.sessionId,
@@ -408,81 +405,121 @@ internal class ChatClientImpl(
         )
         publish(force = true)
 
-        val events = Channel<Pair<String?, JsonObject>>(Channel.UNLIMITED)
+        var includeReadUrl = true
+        var titleEnabled = setup.titleEnabled
+        var capabilityRetry = false
         var failure: Throwable? = null
         var cancelled = false
-        try {
-            coroutineScope {
-                launch(Dispatchers.IO) {
-                    var started = false
-                    var attempt = 0
-                    try {
-                        while (true) {
-                            try {
-                                wire.streamMessages(
-                                    body = body,
-                                    listener = object : StreamListener {
-                                        override fun onEvent(event: String?, data: JsonObject) {
-                                            started = true
-                                            events.trySend(event to data)
-                                        }
-                                    },
-                                    extraHeaders = if (needsBeta) mapOf("anthropic-beta" to WireClient.FILES_BETA) else emptyMap(),
-                                )
-                                return@launch
-                            } catch (error: ApiException) {
-                                val retry = !started && attempt < 1 && (
-                                    error.condition == ApiCondition.NETWORK ||
-                                        error.condition == ApiCondition.SERVER_BUSY
+        var cancellation: CancellationException? = null
+        while (true) {
+            failure = null
+            cancelled = false
+            cancellation = null
+            val body = buildRequestBody(
+                messages,
+                setup.thinkingEnabled,
+                setup.searchEnabled,
+                titleEnabled,
+                includeReadUrl,
+            )
+            val events = Channel<Pair<String?, JsonObject>>(Channel.UNLIMITED)
+            try {
+                coroutineScope {
+                    launch(Dispatchers.IO) {
+                        var started = false
+                        var attempt = 0
+                        try {
+                            while (true) {
+                                try {
+                                    wire.streamMessages(
+                                        body = body,
+                                        listener = object : StreamListener {
+                                            override fun onEvent(event: String?, data: JsonObject) {
+                                                started = true
+                                                events.trySend(event to data)
+                                            }
+                                        },
+                                        extraHeaders = if (needsBeta) mapOf("anthropic-beta" to WireClient.FILES_BETA) else emptyMap(),
                                     )
-                                if (!retry) throw error
-                                attempt += 1
-                                delay(700)
+                                    return@launch
+                                } catch (error: ApiException) {
+                                    val retry = !started && attempt < 1 && (
+                                        error.condition == ApiCondition.NETWORK ||
+                                            error.condition == ApiCondition.SERVER_BUSY
+                                        )
+                                    if (!retry) throw error
+                                    attempt += 1
+                                    delay(700)
+                                }
+                            }
+                        } catch (error: Throwable) {
+                            failure = error
+                        } finally {
+                            events.close()
+                        }
+                    }
+                    for ((eventName, data) in events) {
+                        val type = eventName ?: data.string("type")
+                        if (data.get("error") != null && (type == null || type == "error")) {
+                            throw ApiException.stream(errorText(data))
+                        }
+                        assembler.onEvent(eventName, data)
+                        when (type) {
+                            "content_block_start", "content_block_stop", "message_delta" -> {
+                                publish(force = true)
+                                persist(force = true)
+                            }
+                            "content_block_delta" -> {
+                                publish(force = false)
+                                persist(force = false)
                             }
                         }
-                    } catch (error: Throwable) {
-                        failure = error
-                    } finally {
-                        events.close()
                     }
                 }
-                for ((eventName, data) in events) {
-                    val type = eventName ?: data.string("type")
-                    if (data.get("error") != null && (type == null || type == "error")) {
-                        throw ApiException.stream(errorText(data))
-                    }
-                    assembler.onEvent(eventName, data)
-                    when (type) {
-                        "content_block_start", "content_block_stop", "message_delta" -> {
-                            publish(force = true)
-                            persist(force = true)
-                        }
-                        "content_block_delta" -> {
-                            publish(force = false)
-                            persist(force = false)
-                        }
-                    }
-                }
+            } catch (error: CancellationException) {
+                cancelled = true
+                failure = error
+                cancellation = error
+            } catch (error: Throwable) {
+                failure = error
             }
-        } catch (error: CancellationException) {
-            cancelled = true
-            failure = error
-            throw error
-        } catch (error: Throwable) {
-            failure = error
-        } finally {
-            withContext(NonCancellable) {
-                settle(
-                    session = session,
-                    setup = setup,
-                    ui = ui,
-                    assembler = assembler,
-                    failure = failure,
-                    cancelled = cancelled,
-                    stopRequested = stopRequested || cancelled,
+            if (!cancelled && canRetryWithoutTools(failure, setup, capabilityRetry)) {
+                capabilityRetry = true
+                includeReadUrl = false
+                titleEnabled = false
+                ErrorLog.record(
+                    category = "对话",
+                    summary = "大文件请求降级重试",
+                    detail = "attachments=${setup.attachmentFiles.size}, reason=${failure?.message.orEmpty().take(240)}",
                 )
+                delay(300)
+                continue
             }
+            break
         }
+        withContext(NonCancellable) {
+            settle(
+                session = session,
+                setup = setup,
+                ui = ui,
+                assembler = assembler,
+                failure = failure,
+                cancelled = cancelled,
+                stopRequested = stopRequested || cancelled,
+            )
+        }
+        cancellation?.let { throw it }
+    }
+
+    private fun canRetryWithoutTools(failure: Throwable?, setup: StreamSetup, alreadyRetried: Boolean): Boolean {
+        if (alreadyRetried) return false
+        if (setup.attachmentFiles.isEmpty()) return false
+        if (setup.searchEnabled) return false
+        val api = failure as? ApiException ?: return false
+        if (api.status != 400) return false
+        val message = api.message.orEmpty()
+        return message.contains("user input too long", ignoreCase = true) ||
+            message.contains("exceeds max 32768", ignoreCase = true)
     }
 
     private suspend fun settle(
@@ -597,6 +634,9 @@ internal class ChatClientImpl(
             val message = failure.message ?: ""
             return when {
                 failure.kind == ApiErrorKind.INTERRUPTED -> MessageStatus.FAILED to "生成中断，请重试"
+                failure.status == 400 && message.contains("user input too long", ignoreCase = true) ->
+                    MessageStatus.FAILED to
+                        "文件内容过长，超出当前模式单次输入上限（约 3.2 万 token）。请拆分文件，或关闭联网搜索后重试"
                 failure.status == 400 && message.contains("Content Exists Risk", ignoreCase = true) ->
                     MessageStatus.CONTENT_FILTER to INPUT_RISK_TEXT
                 failure.status == 400 && (
@@ -624,7 +664,14 @@ internal class ChatClientImpl(
         thinkingEnabled: Boolean,
         searchEnabled: Boolean,
         titleEnabled: Boolean,
-    ): JsonObject = ChatRequestBuilder.build(messages, thinkingEnabled, searchEnabled, titleEnabled)
+        includeReadUrl: Boolean,
+    ): JsonObject = ChatRequestBuilder.build(
+        messages,
+        thinkingEnabled,
+        searchEnabled,
+        titleEnabled,
+        includeReadUrl,
+    )
 
     private fun decorateFiles(fragments: List<Fragment>, files: List<Fragment.File>): List<Fragment> {
         val byId = files.associateBy { it.fileId }

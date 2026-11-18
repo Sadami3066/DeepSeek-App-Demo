@@ -63,6 +63,32 @@ class ChatRequestBuilderTest {
     }
 
     @Test
+    fun largeFileRetryOmitsReadUrlAndTitle() {
+        val body = ChatRequestBuilder.build(
+            messages = messages(),
+            thinkingEnabled = true,
+            searchEnabled = false,
+            titleEnabled = false,
+            includeReadUrl = false,
+        )
+        assertNull(body.get("tools"))
+        assertNull(body.get("title"))
+    }
+
+    @Test
+    fun searchToolSurvivesReadUrlRemoval() {
+        val body = ChatRequestBuilder.build(
+            messages = messages(),
+            thinkingEnabled = true,
+            searchEnabled = true,
+            titleEnabled = false,
+            includeReadUrl = false,
+        )
+        val tools = body.array("tools")!!
+        assertEquals(listOf("deepseek_web_search"), tools.map { it.asJsonObject.string("type") })
+    }
+
+    @Test
     fun messagesArrayIsPassedThroughUnchanged() {
         val messages = JsonArray().apply {
             add(JsonObject().apply {

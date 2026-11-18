@@ -29,7 +29,4 @@ internal object ComposerLimits {
         } else {
             null
         }
-
-    fun validateSearchWithFiles(searchEnabled: Boolean, hasIncomingFiles: Boolean): String? =
-        if (searchEnabled && hasIncomingFiles) "联网搜索不支持上传文件" else null
 }

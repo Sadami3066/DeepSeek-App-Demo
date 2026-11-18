@@ -44,14 +44,4 @@ class ComposerLimitsTest {
             ComposerLimits.validateFileSize(ComposerLimits.MAX_FILE_BYTES + 1),
         )
     }
-
-    @Test
-    fun searchAndFilesAreMutuallyExclusive() {
-        assertNull(ComposerLimits.validateSearchWithFiles(true, false))
-        assertNull(ComposerLimits.validateSearchWithFiles(false, true))
-        assertEquals(
-            "联网搜索不支持上传文件",
-            ComposerLimits.validateSearchWithFiles(true, true),
-        )
-    }
 }

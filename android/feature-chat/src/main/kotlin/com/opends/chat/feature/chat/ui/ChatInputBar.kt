@@ -158,13 +158,19 @@ fun ChatInputBar(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .voicePressGesture(
-                        onLongPressStart = onVoiceGestureStart,
-                        onCancelChange = onVoiceCancelChange,
-                        onRelease = onVoiceGestureEnd,
-                        onTap = {
-                            focusRequester.requestFocus()
-                            keyboard?.show()
+                    .then(
+                        if (text.isEmpty()) {
+                            Modifier.voicePressGesture(
+                                onLongPressStart = onVoiceGestureStart,
+                                onCancelChange = onVoiceCancelChange,
+                                onRelease = onVoiceGestureEnd,
+                                onTap = {
+                                    focusRequester.requestFocus()
+                                    keyboard?.show()
+                                },
+                            )
+                        } else {
+                            Modifier
                         },
                     ),
             ) {

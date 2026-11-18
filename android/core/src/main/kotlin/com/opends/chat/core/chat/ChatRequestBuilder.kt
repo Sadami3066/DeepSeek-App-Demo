@@ -12,12 +12,15 @@ internal object ChatRequestBuilder {
         thinkingEnabled: Boolean,
         searchEnabled: Boolean,
         titleEnabled: Boolean,
+        includeReadUrl: Boolean = true,
     ): JsonObject {
         val tools = JsonArray()
-        tools.add(JsonObject().apply {
-            addProperty("type", "deepseek_read_url")
-            addProperty("name", "deepseek_read_url")
-        })
+        if (includeReadUrl) {
+            tools.add(JsonObject().apply {
+                addProperty("type", "deepseek_read_url")
+                addProperty("name", "deepseek_read_url")
+            })
+        }
         if (searchEnabled) {
             tools.add(JsonObject().apply {
                 addProperty("type", "deepseek_web_search")
@@ -31,7 +34,7 @@ internal object ChatRequestBuilder {
             add("thinking", JsonObject().apply {
                 addProperty("type", if (thinkingEnabled) "enabled" else "disabled")
             })
-            add("tools", tools)
+            if (tools.size() > 0) add("tools", tools)
             if (titleEnabled) {
                 add("title", JsonObject().apply { addProperty("enabled", true) })
             }
