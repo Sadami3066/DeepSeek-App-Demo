@@ -36,6 +36,7 @@ internal class CoreGraph(context: Context) {
     private val voiceService = VoiceServiceImpl(settingsStore, wireClient)
 
     init {
+        ErrorLog.install(appContext)
         runBlocking {
             sessionStore.recoverInterruptedMessages()
             sessionStore.pruneEmptySessions()

@@ -8,12 +8,14 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.opends.chat.core.AppSettings
+import com.opends.chat.core.ErrorLog
 import com.opends.chat.core.SettingsStore
 import com.opends.chat.core.ThemeMode
 import com.opends.chat.core.VoiceInputConfig
 import com.opends.chat.core.net.WireSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +25,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.File
 
 internal class SettingsStoreImpl(
@@ -88,7 +91,7 @@ internal class SettingsStoreImpl(
         )
     }
 
-    private suspend fun write(settings: AppSettings) {
+    private suspend fun write(settings: AppSettings) = withContext(NonCancellable) {
         dataStore.edit { preferences ->
             preferences[KEY_API_KEY] = SecretBox.encrypt(settings.apiKey)
             preferences[KEY_BASE_URL] = settings.apiBaseUrl
@@ -111,8 +114,15 @@ internal class SettingsStoreImpl(
 
     override suspend fun setApiKey(key: String) {
         val trimmed = key.trim()
+        try {
+            withContext(NonCancellable) {
+                dataStore.edit { preferences -> preferences[KEY_API_KEY] = SecretBox.encrypt(trimmed) }
+            }
+        } catch (error: Throwable) {
+            ErrorLog.record("设置", "API Key 保存失败", null, error)
+            throw error
+        }
         cached.value = cached.value.copy(apiKey = trimmed)
-        dataStore.edit { preferences -> preferences[KEY_API_KEY] = SecretBox.encrypt(trimmed) }
     }
 
     suspend fun setVoiceInputConfig(config: VoiceInputConfig) {
@@ -152,8 +162,13 @@ internal class SettingsStoreImpl(
 
     override suspend fun update(settings: AppSettings) {
         val normalized = settings.copy(apiKey = settings.apiKey.trim())
+        try {
+            write(normalized)
+        } catch (error: Throwable) {
+            ErrorLog.record("设置", "设置保存失败", null, error)
+            throw error
+        }
         cached.value = normalized
-        write(normalized)
     }
 
     override fun apiKey(): String = cached.value.apiKey

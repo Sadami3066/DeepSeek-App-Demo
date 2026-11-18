@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -104,6 +105,10 @@ fun UserMessageItem(
     message: ChatMessage,
     editRequested: Boolean,
     busy: Boolean,
+    versions: List<Long>?,
+    versionDisabled: Boolean,
+    onSelectVersion: (Long, Float) -> Unit,
+    onSwitcherPosition: (Float) -> Unit,
     onLongPress: (Int, Int) -> Unit,
     onCommitEdit: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -210,6 +215,23 @@ fun UserMessageItem(
                 }
             }
         }
+        if (!editing && versions != null && versions.size > 1) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .offset(x = ChatContentEnd - OdDimens.bubbleRightMargin),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                BranchSwitcherPill(
+                    versionIds = versions,
+                    currentId = message.id,
+                    disabled = versionDisabled,
+                    onSelect = onSelectVersion,
+                    onPosition = onSwitcherPosition,
+                )
+            }
+        }
     }
 }
 
@@ -264,7 +286,8 @@ fun AssistantMessageItem(
     onShare: () -> Unit,
     onOpenSources: (List<SearchResult>) -> Unit,
     onOpenCitation: (SearchResult) -> Unit,
-    onSelectVersion: (Long) -> Unit,
+    onSelectVersion: (Long, Float) -> Unit,
+    onSwitcherPosition: (Float) -> Unit,
     thinkingAutoFold: Boolean = true,
     selectable: Boolean = false,
     modifier: Modifier = Modifier,
@@ -278,9 +301,19 @@ fun AssistantMessageItem(
     val template = replySteps.template
     val sources = remember(message.fragments) { searchSources(message) }
     val citations = remember(message.fragments) { citationSources(message) }
-    val notice = remember(message.status) { statusNotice(message) }
+    val errorTipText = remember(message.fragments) {
+        message.fragments.filterIsInstance<Fragment.Tip>()
+            .filter { it.style.equals("ERROR", ignoreCase = true) }
+            .map { it.content }
+            .filterNot { it.isAiDisclaimer() }
+            .joinToString("\n")
+    }
+    val notice = remember(message.status, errorTipText) {
+        if (errorTipText.isBlank()) statusNotice(message) else null
+    }
     val tipText = remember(message.fragments) {
         message.fragments.filterIsInstance<Fragment.Tip>()
+            .filterNot { it.style.equals("ERROR", ignoreCase = true) }
             .map { it.content }
             .filterNot { it.isAiDisclaimer() }
             .joinToString("\n")
@@ -388,6 +421,28 @@ fun AssistantMessageItem(
                 )
             }
         }
+        if (errorTipText.isNotBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Icon(
+                    imageVector = AppIcons.warning,
+                    contentDescription = null,
+                    modifier = Modifier.padding(top = 4.dp).size(16.dp),
+                    tint = palette.stateErrorPrimary,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = errorTipText,
+                    color = palette.stateErrorPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 22.sp,
+                )
+            }
+        }
         if (tipText.isNotBlank()) {
             Text(
                 text = tipText,
@@ -449,7 +504,9 @@ fun AssistantMessageItem(
                 BranchSwitcherPill(
                     versionIds = versions,
                     currentId = message.id,
+                    disabled = busy,
                     onSelect = onSelectVersion,
+                    onPosition = onSwitcherPosition,
                 )
             }
         }
@@ -605,16 +662,24 @@ private fun ActionIcon(
 private fun BranchSwitcherPill(
     versionIds: List<Long>,
     currentId: Long,
-    onSelect: (Long) -> Unit,
+    disabled: Boolean,
+    onSelect: (Long, Float) -> Unit,
+    onPosition: (Float) -> Unit,
 ) {
     val palette = OdTheme.colors
     val index = versionIds.indexOf(currentId)
     if (index < 0) return
+    var anchorTop by remember { mutableStateOf(0f) }
     Row(
         modifier = Modifier
             .height(30.dp)
             .clip(CircleShape)
             .border(OdDimens.inputBorder, palette.divider, CircleShape)
+            .onGloballyPositioned { coordinates ->
+                val top = coordinates.positionInWindow().y
+                anchorTop = top
+                onPosition(top)
+            }
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -622,9 +687,9 @@ private fun BranchSwitcherPill(
             res = R.drawable.ic_chevron_left_outline_20,
             size = 20.dp,
             boxSize = 24.dp,
-            onClick = { versionIds.getOrNull(index - 1)?.let(onSelect) },
-            tint = if (index > 0) palette.brandPrimary else palette.labelDimmed,
-            enabled = index > 0,
+            onClick = { versionIds.getOrNull(index - 1)?.let { onSelect(it, anchorTop) } },
+            tint = if (!disabled && index > 0) palette.brandPrimary else palette.labelDimmed,
+            enabled = !disabled && index > 0,
         )
         Text(
             text = "${index + 1}/${versionIds.size}",
@@ -639,9 +704,9 @@ private fun BranchSwitcherPill(
             res = R.drawable.ic_chevron_right_outline_20,
             size = 20.dp,
             boxSize = 24.dp,
-            onClick = { versionIds.getOrNull(index + 1)?.let(onSelect) },
-            tint = if (index < versionIds.size - 1) palette.brandPrimary else palette.labelDimmed,
-            enabled = index < versionIds.size - 1,
+            onClick = { versionIds.getOrNull(index + 1)?.let { onSelect(it, anchorTop) } },
+            tint = if (!disabled && index < versionIds.size - 1) palette.brandPrimary else palette.labelDimmed,
+            enabled = !disabled && index < versionIds.size - 1,
         )
     }
 }

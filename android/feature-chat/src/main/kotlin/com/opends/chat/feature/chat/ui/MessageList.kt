@@ -2,6 +2,7 @@
 
 package com.opends.chat.feature.chat.ui
 
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
@@ -15,13 +16,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -30,13 +32,16 @@ import com.opends.chat.core.ChatMessage
 import com.opends.chat.core.Role
 import com.opends.chat.core.SearchResult
 import com.opends.chat.feature.chat.ChatUiState
-import com.opends.chat.feature.chat.ReadingState
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 private const val STICKY_THRESHOLD_DP = 40
 private val FirstMessageTop = 20.3.dp
 private val ColumnBottom = 25.7.dp
 private val ItemGap = 22.dp
+private val RevealTopPadding = 12.dp
+
+private data class VersionAnchor(val targetId: Long, val switcherTop: Float)
 
 @Composable
 fun MessageList(
@@ -53,6 +58,8 @@ fun MessageList(
     onOpenSources: (List<SearchResult>) -> Unit,
     onOpenCitation: (SearchResult) -> Unit,
     onLongPressMessage: (ChatMessage, Int, Int) -> Unit,
+    scrollToMessageId: Long? = null,
+    onScrollToMessageHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -60,6 +67,9 @@ fun MessageList(
     var follow by remember { mutableStateOf(true) }
     val density = LocalDensity.current
     val thresholdPx = with(density) { STICKY_THRESHOLD_DP.dp.toPx() }
+    val switcherTops = remember { HashMap<Long, Float>() }
+    var switcherTick by remember { mutableIntStateOf(0) }
+    var versionAnchor by remember { mutableStateOf<VersionAnchor?>(null) }
 
     fun nearBottom(): Boolean {
         val info = listState.layoutInfo
@@ -84,9 +94,12 @@ fun MessageList(
             }
     }
 
-    val contentSignature = state.messages.size to state.messages.lastOrNull()?.let(::contentLength)
-    LaunchedEffect(contentSignature) {
-        if (follow && state.messages.isNotEmpty()) {
+    var lastMessageCount by remember { mutableStateOf(state.messages.size) }
+    val lastContentLength = state.messages.lastOrNull()?.let(::contentLength) ?: 0
+    LaunchedEffect(state.messages.size, lastContentLength, state.streaming) {
+        val grew = state.messages.size > lastMessageCount
+        lastMessageCount = state.messages.size
+        if (follow && state.messages.isNotEmpty() && (grew || state.streaming)) {
             listState.scrollToItem(state.messages.lastIndex, Int.MAX_VALUE / 2)
         }
     }
@@ -118,6 +131,49 @@ fun MessageList(
         }
     }
 
+    fun onVersionSelected(messageId: Long, siblingId: Long, anchorTop: Float) {
+        if (state.streaming) return
+        follow = false
+        switcherTops.remove(siblingId)
+        versionAnchor = VersionAnchor(siblingId, anchorTop)
+        onSelectVersion(messageId, siblingId)
+    }
+
+    fun onSwitcherPosition(messageId: Long, top: Float) {
+        switcherTops[messageId] = top
+        if (versionAnchor?.targetId == messageId) {
+            switcherTick += 1
+        }
+    }
+
+    LaunchedEffect(versionAnchor) {
+        if (versionAnchor != null) {
+            kotlinx.coroutines.delay(800)
+            if (versionAnchor != null) versionAnchor = null
+        }
+    }
+
+    LaunchedEffect(versionAnchor, state.messages, switcherTick) {
+        val anchor = versionAnchor ?: return@LaunchedEffect
+        if (state.messages.none { it.id == anchor.targetId }) return@LaunchedEffect
+        val newTop = switcherTops[anchor.targetId] ?: return@LaunchedEffect
+        val delta = newTop - anchor.switcherTop
+        if (abs(delta) > 0.5f) {
+            listState.scrollBy(delta)
+        }
+        versionAnchor = null
+    }
+
+    LaunchedEffect(scrollToMessageId, state.messages) {
+        val target = scrollToMessageId ?: return@LaunchedEffect
+        val index = state.messages.indexOfFirst { it.id == target }
+        if (index < 0) return@LaunchedEffect
+        follow = false
+        withFrameNanos { }
+        listState.scrollToItem(index, with(density) { RevealTopPadding.roundToPx() })
+        onScrollToMessageHandled()
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -138,6 +194,10 @@ fun MessageList(
                         message = message,
                         editRequested = editRequestId == message.id,
                         busy = state.streaming,
+                        versions = state.versions[message.id],
+                        versionDisabled = state.streaming,
+                        onSelectVersion = { sibling, top -> onVersionSelected(message.id, sibling, top) },
+                        onSwitcherPosition = { top -> onSwitcherPosition(message.id, top) },
                         onLongPress = { x, y -> onLongPressMessage(message, x, y) },
                         onCommitEdit = { text -> onEditMessage(message.id, text) },
                     )
@@ -157,7 +217,8 @@ fun MessageList(
                         onShare = { onShare(message) },
                         onOpenSources = onOpenSources,
                         onOpenCitation = onOpenCitation,
-                        onSelectVersion = { sibling -> onSelectVersion(message.id, sibling) },
+                        onSelectVersion = { sibling, top -> onVersionSelected(message.id, sibling, top) },
+                        onSwitcherPosition = { top -> onSwitcherPosition(message.id, top) },
                         thinkingAutoFold = state.thinkingAutoFold,
                         selectable = selectionMessageId == message.id,
                     )

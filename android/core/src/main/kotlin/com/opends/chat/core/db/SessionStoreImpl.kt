@@ -199,30 +199,6 @@ internal class SessionStoreImpl(
 
     suspend fun loadSessionsNow(): List<SessionInfo> = withContext(Dispatchers.IO) { loadSessions() }
 
-    suspend fun countSessionFiles(sessionId: String): Int = withDatabase { db ->
-        val tableName = DatabaseHelper.messageTable(sessionId)
-        val exists = db.rawQuery(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            arrayOf(tableName),
-        ).use { it.moveToFirst() }
-        if (!exists) return@withDatabase 0
-        val fileIds = HashSet<String>()
-        db.rawQuery("SELECT fragments FROM ${DatabaseHelper.quote(tableName)}", null).use { cursor ->
-            while (cursor.moveToNext()) {
-                FragmentCodec.parse(cursor.getString(0)).forEach { item ->
-                    if (item.string("type") != FragmentCodec.TYPE_FILE) return@forEach
-                    val files = item.get("files")?.takeIf { it.isJsonArray }?.asJsonArray ?: return@forEach
-                    files.forEach { entry ->
-                        if (entry.isJsonObject) {
-                            FragmentCodec.fileOf(entry.asJsonObject)?.let { fileIds.add(it.fileId) }
-                        }
-                    }
-                }
-            }
-        }
-        fileIds.size
-    }
-
     suspend fun recoverInterruptedMessages(): Int {
         val recovered = withDatabase { db ->
             InterruptedMessageRecovery.run(AndroidStatusRecoveryTarget(db))

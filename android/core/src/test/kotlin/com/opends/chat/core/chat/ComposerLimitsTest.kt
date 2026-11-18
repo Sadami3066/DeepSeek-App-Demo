@@ -27,15 +27,12 @@ class ComposerLimitsTest {
     }
 
     @Test
-    fun fileCountLimitIsPerSession() {
-        assertNull(ComposerLimits.validateFileCount(19, 1))
+    fun fileCountLimitIsPerMessage() {
+        assertNull(ComposerLimits.validateFileCount(19))
+        assertNull(ComposerLimits.validateFileCount(20))
         assertEquals(
-            "上传文件数达到上限，每个对话可上传 20 个文件",
-            ComposerLimits.validateFileCount(20, 1),
-        )
-        assertEquals(
-            "上传文件数达到上限，每个对话可上传 20 个文件",
-            ComposerLimits.validateFileCount(0, 21),
+            "单条消息最多上传 20 个文件",
+            ComposerLimits.validateFileCount(21),
         )
     }
 

@@ -1,6 +1,7 @@
 package com.opends.chat.core.net
 
 import com.google.gson.Gson
+import com.opends.chat.core.ErrorLog
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.opends.chat.core.util.array
@@ -59,8 +60,8 @@ internal class WireClient(
             .header("Accept", "application/json")
             .get()
             .build()
-        execute(request).use { response ->
-            if (!response.isSuccessful) throw httpException(response)
+        execute(request, ENDPOINT_MODELS).use { response ->
+            if (!response.isSuccessful) throw httpException(response, ENDPOINT_MODELS)
             val body = response.body?.string().orEmpty()
             val root = runCatching { JsonParser.parseString(body) }.getOrNull()
                 ?: throw ApiException.protocol("模型列表响应无法解析")
@@ -77,7 +78,7 @@ internal class WireClient(
     ) = withContext(Dispatchers.IO) {
         val key = requireKey()
         val builder = Request.Builder()
-            .url(url("/anthropic/v1/messages"))
+            .url(url(ENDPOINT_MESSAGES))
             .header("x-api-key", key)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
@@ -90,20 +91,26 @@ internal class WireClient(
                 call.execute()
             } catch (error: IOException) {
                 if (call.isCanceled()) throw ApiException.interrupted("已停止生成")
-                throw ApiException.network(error)
+                throw ApiException.network(error, ENDPOINT_MESSAGES)
             }
             response.use { resp ->
-                if (!resp.isSuccessful) throw httpException(resp)
+                if (!resp.isSuccessful) throw httpException(resp, ENDPOINT_MESSAGES)
                 val contentType = resp.header("Content-Type").orEmpty()
                 if (!contentType.contains("text/event-stream", ignoreCase = true)) {
-                    throw ApiException.protocol("响应格式异常")
+                    val raw = runCatching { resp.body?.string() }.getOrNull().orEmpty()
+                    ErrorLog.record(
+                        category = "接口",
+                        summary = "$ENDPOINT_MESSAGES 返回非流式响应",
+                        detail = "content-type=$contentType, body=${raw.take(400)}",
+                    )
+                    throw ApiException.stream(apiErrorMessage(raw) ?: "响应格式异常")
                 }
                 val source = resp.body?.source() ?: throw ApiException.protocol("响应内容为空")
                 try {
                     readSse(source, listener)
                 } catch (error: IOException) {
                     if (call.isCanceled()) throw ApiException.interrupted("已停止生成")
-                    throw ApiException.network(error)
+                    throw ApiException.network(error, ENDPOINT_MESSAGES)
                 }
             }
         } finally {
@@ -186,14 +193,14 @@ internal class WireClient(
         val media = mime.takeIf { it.isNotBlank() }?.toMediaTypeOrNull() ?: OCTET_STREAM
         builder.addFormDataPart("file", fileName, bytes.toRequestBody(media))
         val request = Request.Builder()
-            .url(url("/anthropic/v1/files"))
+            .url(url(ENDPOINT_FILES))
             .header("x-api-key", requireKey())
             .header("anthropic-beta", FILES_BETA)
             .post(builder.build())
             .build()
-        execute(request).use { response ->
+        execute(request, ENDPOINT_FILES).use { response ->
             val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw httpException(response.code, response.message, body)
+            if (!response.isSuccessful) throw httpException(response.code, response.message, body, ENDPOINT_FILES)
             val json = runCatching { JsonParser.parseString(body) }.getOrNull()?.takeIf { it.isJsonObject }
                 ?: throw ApiException.protocol("文件上传响应无法解析")
             return json.asJsonObject.string("id") ?: throw ApiException.protocol("文件上传响应缺少 id")
@@ -206,7 +213,7 @@ internal class WireClient(
             .addFormDataPart("file", "recording.wav", wav.toRequestBody(AUDIO_WAV))
             .build()
         val request = Request.Builder()
-            .url(url("/v1/tools/asr"))
+            .url(url(ENDPOINT_ASR))
             .header("Authorization", "Bearer ${requireKey()}")
             .post(body)
             .build()
@@ -214,13 +221,13 @@ internal class WireClient(
         var text: String? = null
         while (text == null) {
             try {
-                execute(request).use { response ->
+                execute(request, ENDPOINT_ASR).use { response ->
                     val raw = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) throw httpException(response.code, response.message, raw)
+                    if (!response.isSuccessful) throw httpException(response.code, response.message, raw, ENDPOINT_ASR)
                     val json = runCatching { JsonParser.parseString(raw) }.getOrNull()?.takeIf { it.isJsonObject }
                         ?: throw ApiException.protocol("语音识别响应无法解析")
                     if (json.asJsonObject.get("error") != null) {
-                        throw ApiException.stream(errorMessage(raw) ?: "语音识别失败")
+                        throw ApiException.stream(apiErrorMessage(raw) ?: "语音识别失败")
                     }
                     text = json.asJsonObject.string("text")
                         ?: throw ApiException.protocol("语音识别响应缺少 text")
@@ -246,7 +253,7 @@ internal class WireClient(
             addProperty("filter_markdown", true)
         }
         val request = Request.Builder()
-            .url(url("/v1/tools/tts"))
+            .url(url(ENDPOINT_TTS))
             .header("Authorization", "Bearer ${requireKey()}")
             .header("Accept", "*/*")
             .post(gson.toJson(payload).toRequestBody(JSON_MEDIA))
@@ -258,12 +265,12 @@ internal class WireClient(
                 call.execute()
             } catch (error: IOException) {
                 if (call.isCanceled()) throw ApiException.interrupted("朗读已停止")
-                throw ApiException.network(error)
+                throw ApiException.network(error, ENDPOINT_TTS)
             }
             response.use { resp ->
                 if (!resp.isSuccessful) {
                     val raw = runCatching { resp.body?.string() }.getOrNull().orEmpty()
-                    throw httpException(resp.code, resp.message, raw)
+                    throw httpException(resp.code, resp.message, raw, ENDPOINT_TTS)
                 }
                 val stream = resp.body?.byteStream() ?: throw ApiException.protocol("朗读响应为空")
                 val buffer = ByteArray(8192)
@@ -275,7 +282,7 @@ internal class WireClient(
                     }
                 } catch (error: IOException) {
                     if (call.isCanceled()) throw ApiException.interrupted("朗读已停止")
-                    throw ApiException.network(error)
+                    throw ApiException.network(error, ENDPOINT_TTS)
                 }
             }
         } finally {
@@ -291,10 +298,10 @@ internal class WireClient(
         speechCall?.cancel()
     }
 
-    private fun execute(request: Request): Response = try {
+    private fun execute(request: Request, endpoint: String): Response = try {
         client.newCall(request).execute()
     } catch (error: IOException) {
-        throw ApiException.network(error)
+        throw ApiException.network(error, endpoint)
     }
 
     private fun requireKey(): String {
@@ -307,33 +314,23 @@ internal class WireClient(
 
     private fun url(path: String): String = baseUrl() + path
 
-    private fun httpException(response: Response): ApiException = httpException(
+    private fun httpException(response: Response, endpoint: String): ApiException = httpException(
         response.code,
         response.message,
         runCatching { response.body?.string() }.getOrNull().orEmpty(),
+        endpoint,
     )
 
-    private fun httpException(code: Int, message: String, body: String): ApiException {
-        val text = errorMessage(body)
-            ?: body.trim().take(300).ifEmpty { message.ifEmpty { "HTTP $code" } }
-        return ApiException(ApiErrorKind.HTTP, text, code)
-    }
-
-    private fun errorMessage(body: String): String? {
-        if (body.isBlank()) return null
-        val root = runCatching { JsonParser.parseString(body) }.getOrNull() ?: return null
-        if (!root.isJsonObject) return null
-        val json = root.asJsonObject
-        val error = json.get("error")
-        if (error != null && error.isJsonObject) {
-            val errorObject = error.asJsonObject
-            errorObject.string("message")?.takeIf { it.isNotBlank() }?.let { return it }
-        }
-        return json.string("message")?.takeIf { it.isNotBlank() }
-    }
+    private fun httpException(code: Int, message: String, body: String, endpoint: String): ApiException =
+        ApiException.http(code, message, body, endpoint)
 
     companion object {
         const val FILES_BETA = "files-api-2025-04-14"
+        private const val ENDPOINT_MODELS = "/models"
+        private const val ENDPOINT_MESSAGES = "/anthropic/v1/messages"
+        private const val ENDPOINT_FILES = "/anthropic/v1/files"
+        private const val ENDPOINT_ASR = "/v1/tools/asr"
+        private const val ENDPOINT_TTS = "/v1/tools/tts"
         private val JSON_MEDIA: MediaType = "application/json".toMediaType()
         private val AUDIO_WAV: MediaType = "audio/wav".toMediaType()
         private val OCTET_STREAM: MediaType = "application/octet-stream".toMediaType()

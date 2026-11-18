@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.opends.chat.core.AttachmentRef
 import com.opends.chat.core.ChatClient
+import com.opends.chat.core.ErrorLog
 import com.opends.chat.core.ChatMessage
 import com.opends.chat.core.Fragment
 import com.opends.chat.core.GenerationState
@@ -20,7 +21,7 @@ import com.opends.chat.core.net.ApiErrorKind
 import com.opends.chat.core.net.ApiException
 import com.opends.chat.core.net.StreamListener
 import com.opends.chat.core.net.WireClient
-import com.opends.chat.core.net.conditionText
+import com.opends.chat.core.net.userText
 import com.opends.chat.core.settings.SettingsStoreImpl
 import com.opends.chat.core.util.obj
 import com.opends.chat.core.util.string
@@ -29,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal class ChatClientImpl(
@@ -69,9 +72,7 @@ internal class ChatClientImpl(
         ComposerLimits.validateText(text)?.let { throw userError(it) }
         ComposerLimits.validateSearchWithFiles(input.searchEnabled, input.attachments.isNotEmpty())
             ?.let { throw userError(it) }
-        val sessionFileCount = store.countSessionFiles(sessionId)
-        ComposerLimits.validateFileCount(sessionFileCount, input.attachments.size)
-            ?.let { throw userError(it) }
+        ComposerLimits.validateFileCount(input.attachments.size)?.let { throw userError(it) }
         input.attachments.firstOrNull { it.size > 0 }?.let { attachment ->
             ComposerLimits.validateFileSize(attachment.size)?.let { throw userError(it) }
         }
@@ -323,6 +324,7 @@ internal class ChatClientImpl(
         } catch (error: ApiException) {
             Result.failure(error)
         } catch (error: Exception) {
+            ErrorLog.record("对话", "请求异常", null, error)
             Result.failure(userError(error.message ?: "操作失败"))
         } finally {
             activeJob = null
@@ -412,16 +414,32 @@ internal class ChatClientImpl(
         try {
             coroutineScope {
                 launch(Dispatchers.IO) {
+                    var started = false
+                    var attempt = 0
                     try {
-                        wire.streamMessages(
-                            body = body,
-                            listener = object : StreamListener {
-                                override fun onEvent(event: String?, data: JsonObject) {
-                                    events.trySend(event to data)
-                                }
-                            },
-                            extraHeaders = if (needsBeta) mapOf("anthropic-beta" to WireClient.FILES_BETA) else emptyMap(),
-                        )
+                        while (true) {
+                            try {
+                                wire.streamMessages(
+                                    body = body,
+                                    listener = object : StreamListener {
+                                        override fun onEvent(event: String?, data: JsonObject) {
+                                            started = true
+                                            events.trySend(event to data)
+                                        }
+                                    },
+                                    extraHeaders = if (needsBeta) mapOf("anthropic-beta" to WireClient.FILES_BETA) else emptyMap(),
+                                )
+                                return@launch
+                            } catch (error: ApiException) {
+                                val retry = !started && attempt < 1 && (
+                                    error.condition == ApiCondition.NETWORK ||
+                                        error.condition == ApiCondition.SERVER_BUSY
+                                    )
+                                if (!retry) throw error
+                                attempt += 1
+                                delay(700)
+                            }
+                        }
                     } catch (error: Throwable) {
                         failure = error
                     } finally {
@@ -480,6 +498,7 @@ internal class ChatClientImpl(
         val stopReason = assembler.stopReason
         var status = MessageStatus.FINISHED
         var template: String? = null
+        var failureText: String? = null
         var keepContinuable = assembler.canContinue
         val refusal = stopReason == "refusal"
 
@@ -499,7 +518,11 @@ internal class ChatClientImpl(
             failure != null -> {
                 val mapped = mapFailure(failure, stopReason)
                 status = mapped.first
-                template = if (mapped.first == MessageStatus.CONTENT_FILTER) mapped.second else null
+                if (mapped.first == MessageStatus.CONTENT_FILTER) {
+                    template = mapped.second
+                } else {
+                    failureText = mapped.second.takeIf { it.isNotBlank() }
+                }
                 keepContinuable = false
             }
             stopReason == "max_tokens" -> {
@@ -510,15 +533,40 @@ internal class ChatClientImpl(
             }
             else -> {
                 status = MessageStatus.FAILED
+                failureText = "生成中断，请重试"
                 keepContinuable = false
             }
+        }
+
+        if (failure != null && !cancelled && !stopRequested) {
+            val api = failure as? ApiException
+            ErrorLog.record(
+                category = "对话",
+                summary = "生成失败（${status.name}）",
+                detail = buildString {
+                    append("endpoint=").append(api?.endpoint ?: "-")
+                    append(", status=").append(api?.status ?: "-")
+                    append(", kind=").append(api?.kind?.name ?: failure.javaClass.simpleName)
+                    append(", stop_reason=").append(stopReason ?: "-")
+                    append(", message=").append(failure.message.orEmpty().take(300))
+                },
+                error = failure,
+            )
         }
 
         if (template != null) blocks.add(WireBlock.Template(template))
 
         val items = WireCodec.canonical(blocks)
+        if (failureText != null) {
+            items.add(JsonObject().apply {
+                addProperty("type", WireCodec.TYPE_TIP)
+                addProperty("content", failureText)
+                addProperty("style", "ERROR")
+            })
+        }
         WireCodec.appendMeta(items, stopReason, assembler.title)
-        val fragments = WireCodec.toModelFragments(blocks)
+        val fragments = WireCodec.toModelFragments(blocks).toMutableList()
+        if (failureText != null) fragments.add(Fragment.Tip(failureText, "ERROR"))
         val index = ui.indexOfFirst { it.id == setup.assistantId }
         if (index >= 0) {
             ui[index] = ui[index].copy(
@@ -548,20 +596,7 @@ internal class ChatClientImpl(
         if (failure is ApiException) {
             val message = failure.message ?: ""
             return when {
-                failure.condition == ApiCondition.UNAUTHORIZED -> MessageStatus.FAILED to "API Key 无效或已被删除，请更换后重试"
-                failure.condition == ApiCondition.INSUFFICIENT_BALANCE -> MessageStatus.FAILED to "账户余额不足，请充值后重试"
-                failure.condition == ApiCondition.RATE_LIMITED -> MessageStatus.FAILED to "请求过于频繁，请稍后再试"
-                failure.condition == ApiCondition.SERVER_BUSY -> MessageStatus.FAILED to "服务器繁忙，请稍后再试"
                 failure.kind == ApiErrorKind.INTERRUPTED -> MessageStatus.FAILED to "生成中断，请重试"
-                failure.condition == ApiCondition.NETWORK -> {
-                    val timeout = message.contains("timeout", ignoreCase = true) ||
-                        message.contains("timed out", ignoreCase = true)
-                    if (timeout) {
-                        MessageStatus.TIMEOUT to "等待响应超时，请重试"
-                    } else {
-                        MessageStatus.FAILED to "网络异常，请检查你的网络状况"
-                    }
-                }
                 failure.status == 400 && message.contains("Content Exists Risk", ignoreCase = true) ->
                     MessageStatus.CONTENT_FILTER to INPUT_RISK_TEXT
                 failure.status == 400 && (
@@ -571,10 +606,17 @@ internal class ChatClientImpl(
                         message.contains("maximum context", ignoreCase = true)
                     ) -> MessageStatus.CONTEXT_LENGTH_EXCEEDED to CONTEXT_TEXT
                 stopReason == "refusal" -> MessageStatus.CONTENT_FILTER to REFUSAL_TEXT
-                else -> MessageStatus.FAILED to conditionText(failure.condition).ifEmpty { message }
+                failure.condition == ApiCondition.NETWORK -> {
+                    val timeout = failure.cause is SocketTimeoutException ||
+                        message.contains("timeout", ignoreCase = true) ||
+                        message.contains("timed out", ignoreCase = true)
+                    if (timeout) MessageStatus.TIMEOUT to failure.userText
+                    else MessageStatus.FAILED to failure.userText
+                }
+                else -> MessageStatus.FAILED to failure.userText
             }
         }
-        return MessageStatus.FAILED to (failure.message ?: "生成失败，请稍后重试")
+        return MessageStatus.FAILED to failure.userText()
     }
 
     private fun buildRequestBody(
@@ -596,11 +638,20 @@ internal class ChatClientImpl(
     }
 
     private suspend fun settleSetupError(sessionId: String, assistantId: Long, message: String) {
-        val canonical = mutableListOf<JsonObject>()
+        ErrorLog.record("对话", "请求发送失败", message.take(300))
+        val canonical = mutableListOf(JsonObject().apply {
+            addProperty("type", WireCodec.TYPE_TIP)
+            addProperty("content", message)
+            addProperty("style", "ERROR")
+        })
         val ui = store.cachedOrLoad(sessionId).toMutableList()
         val index = ui.indexOfFirst { it.id == assistantId }
         if (index >= 0) {
-            ui[index] = ui[index].copy(status = MessageStatus.FAILED, fragments = emptyList(), prefix = false)
+            ui[index] = ui[index].copy(
+                status = MessageStatus.FAILED,
+                fragments = listOf(Fragment.Tip(message, "ERROR")),
+                prefix = false,
+            )
             store.publish(sessionId, ui.toList())
             store.updateMessage(sessionId, ui[index], FragmentCodec.encode(canonical))
         }
@@ -640,10 +691,7 @@ internal class ChatClientImpl(
             val serverId = try {
                 wire.uploadFile(bytes, file.name ?: file.fileId, mime, purpose)
             } catch (error: ApiException) {
-                throw ApiException.upload(
-                    conditionText(error.condition).ifEmpty { "上传失败" },
-                    error.isRetryable,
-                )
+                throw ApiException.upload(error.userText, error.isRetryable)
             }
             store.putUpload(file.fileId, serverId, purpose)
         }

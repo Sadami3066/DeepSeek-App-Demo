@@ -7,7 +7,7 @@ import java.util.UUID
 
 internal class ArchiveZipSource private constructor(
     private val zipFile: ZipFile,
-    private val tempFile: File,
+    private val tempFile: File?,
 ) : AutoCloseable {
 
     internal class Entry(
@@ -37,10 +37,19 @@ internal class ArchiveZipSource private constructor(
 
     override fun close() {
         runCatching { zipFile.close() }
-        runCatching { tempFile.delete() }
+        tempFile?.let { runCatching { it.delete() } }
     }
 
     companion object {
+        fun open(file: File): ArchiveZipSource {
+            val zipFile = try {
+                ZipFile(file)
+            } catch (error: Exception) {
+                throw ArchiveException("无法识别该文件，请选择 DeepSeek 导出的历史对话 ZIP 文件")
+            }
+            return ArchiveZipSource(zipFile, null)
+        }
+
         fun open(bytes: ByteArray, cacheDir: File): ArchiveZipSource {
             if (!isZipHeader(bytes)) {
                 throw ArchiveException("无法识别该文件，请选择 DeepSeek 导出的历史对话 ZIP 文件")

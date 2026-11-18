@@ -179,5 +179,6 @@ class RealSseReplayTest {
         is WireBlock.Atomic -> "tool"
         is WireBlock.OpenPage -> "tool"
         is WireBlock.FindPage -> "tool"
+        is WireBlock.Notice -> "notice"
     }
 }

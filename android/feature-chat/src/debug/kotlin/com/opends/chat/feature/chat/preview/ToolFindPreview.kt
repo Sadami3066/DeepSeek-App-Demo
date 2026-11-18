@@ -68,7 +68,8 @@ private fun PreviewMessage(message: ChatMessage, streaming: Boolean) {
         onShare = {},
         onOpenSources = {},
         onOpenCitation = {},
-        onSelectVersion = {},
+        onSelectVersion = { _, _ -> },
+        onSwitcherPosition = {},
     )
 }
 

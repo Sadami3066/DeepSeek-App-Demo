@@ -3,6 +3,8 @@ package com.opends.chat.core
 import com.opends.chat.core.chat.ChatClientImpl
 import com.opends.chat.core.db.SessionStoreImpl
 import com.opends.chat.core.net.WireClient
+import com.opends.chat.core.net.networkDetail
+import com.opends.chat.core.net.userText
 import com.opends.chat.core.settings.SettingsStoreImpl
 import com.opends.chat.core.voice.VoiceServiceImpl
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -129,20 +131,16 @@ object OpenDSApi {
             client.validateKeyWith(apiKey, target)
             Result.success(Unit)
         } catch (error: com.opends.chat.core.net.ApiException) {
-            Result.failure(IllegalStateException(verifyErrorText(error)))
+            Result.failure(IllegalStateException(error.userText))
         } catch (error: Exception) {
-            Result.failure(IllegalStateException("网络异常，请检查你的网络状况"))
+            ErrorLog.record("网络", "API Key 校验失败", null, error)
+            Result.failure(IllegalStateException(networkDetail(error.cause ?: error)))
         }
     }
 
-    private fun verifyErrorText(error: com.opends.chat.core.net.ApiException): String = when {
-        error.status == 401 -> "API Key 无效，请检查后重试"
-        error.status == 402 -> "账户余额不足，请充值后重试"
-        error.status == 429 -> "请求过于频繁，请稍后再试"
-        error.condition == com.opends.chat.core.net.ApiCondition.NETWORK -> "网络异常，请检查你的网络状况"
-        !error.message.isNullOrBlank() -> error.message ?: "API Key 校验失败"
-        else -> "API Key 校验失败"
-    }
+    fun describeError(error: Throwable): String = runCatching {
+        error.userText()
+    }.getOrNull().orEmpty().ifBlank { error.message?.takeIf { it.isNotBlank() } ?: "操作失败，请重试" }
 
     suspend fun clearAllSessions(): Boolean = runCatching {
         val store = ApiBridge.sessions ?: return false

@@ -39,6 +39,8 @@ internal sealed class WireBlock {
 
     class Template(val content: String) : WireBlock()
 
+    class Notice(val content: String, val style: String) : WireBlock()
+
     class OpenPage : WireBlock() {
         var status: String = "WIP"
         var stageId: Int? = null
@@ -101,6 +103,11 @@ internal object WireCodec {
             is WireBlock.Template -> JsonObject().apply {
                 addProperty("type", TYPE_TEMPLATE_RESPONSE)
                 addProperty("content", block.content)
+            }
+            is WireBlock.Notice -> JsonObject().apply {
+                addProperty("type", TYPE_TIP)
+                addProperty("content", block.content)
+                addProperty("style", block.style)
             }
             is WireBlock.OpenPage -> JsonObject().apply {
                 addProperty("type", FragmentCodec.TYPE_TOOL_OPEN)
@@ -176,6 +183,8 @@ internal object WireCodec {
                 it.stageId = item.number("stage_id")?.toInt()
             }
             TYPE_TEMPLATE_RESPONSE -> WireBlock.Template(item.string("content") ?: "")
+            TYPE_TIP -> item.string("style").takeIf { it == "ERROR" }
+                ?.let { WireBlock.Notice(item.string("content") ?: "", it) }
             TYPE_SERVER_TOOL_USE, TYPE_WEB_SEARCH_RESULT, TYPE_WEB_FETCH_RESULT -> {
                 val json = item.get("block")?.takeIf { it.isJsonObject }?.asJsonObject
                 json?.let { WireBlock.Atomic(it, item.number("stage_id")?.toInt()) }
@@ -293,6 +302,7 @@ internal object WireCodec {
                     )
                 )
                 is WireBlock.Template -> output.add(Fragment.TemplateResponse(block.content))
+                is WireBlock.Notice -> output.add(Fragment.Tip(block.content, block.style))
                 is WireBlock.OpenPage -> output.add(
                     Fragment.ToolOpen(
                         status = block.status,
@@ -479,6 +489,7 @@ internal object WireCodec {
                         addProperty("content", block.content)
                     })
                 }
+                is WireBlock.Notice -> Unit
                 is WireBlock.OpenPage -> {
                     flushText()
                     output.add(JsonObject().apply {
@@ -862,7 +873,7 @@ internal object WireCodec {
                         pendingSeparator = true
                     }
                 }
-                is WireBlock.Template -> pendingSeparator = true
+                is WireBlock.Template, is WireBlock.Notice -> pendingSeparator = true
                 is WireBlock.OpenPage, is WireBlock.FindPage -> pendingSeparator = true
                 is WireBlock.Atomic -> {
                     val json = block.json

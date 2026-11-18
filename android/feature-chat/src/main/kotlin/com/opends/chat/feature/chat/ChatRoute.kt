@@ -86,10 +86,19 @@ fun ChatRoute(
     onSessionCreated: (String) -> Unit,
     onOpenSider: () -> Unit,
     onOpenSettings: () -> Unit,
+    initialMessageId: Long? = null,
+    onInitialMessageHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val viewModel: ChatViewModel = viewModel()
     LaunchedEffect(sessionId) { viewModel.bind(sessionId?.takeIf { it.isNotBlank() }, onSessionCreated) }
+    LaunchedEffect(sessionId, initialMessageId) {
+        val targetSession = sessionId?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        val targetMessage = initialMessageId ?: return@LaunchedEffect
+        viewModel.revealMessage(targetSession, targetMessage)
+        kotlinx.coroutines.delay(3000)
+        onInitialMessageHandled()
+    }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val draft by viewModel.draftState.collectAsStateWithLifecycle()
     val voice by viewModel.voiceState.collectAsStateWithLifecycle()
@@ -187,7 +196,7 @@ fun ChatRoute(
             if (incoming.isNotEmpty()) {
                 val room = MaxAttachmentCount - existing.size
                 if (room <= 0) {
-                    viewModel.showToast("上传文件数达到上限，每个对话可上传 $MaxAttachmentCount 个文件", withIcon = false)
+                    viewModel.showToast("单条消息最多上传 $MaxAttachmentCount 个文件", withIcon = false)
                 } else {
                     val accepted = ArrayList<Uri>()
                     var reachedLimit = false
@@ -203,7 +212,7 @@ fun ChatRoute(
                         accepted.add(uri)
                     }
                     if (reachedLimit) {
-                        viewModel.showToast("上传文件数达到上限，每个对话可上传 $MaxAttachmentCount 个文件", withIcon = false)
+                        viewModel.showToast("单条消息最多上传 $MaxAttachmentCount 个文件", withIcon = false)
                     }
                     if (accepted.isNotEmpty()) {
                         viewModel.addAttachments(accepted)
@@ -350,6 +359,8 @@ fun ChatRoute(
                         if (attachOpen) attachOpen = false
                         contextMenuTarget = ContextMenuTarget(message, x, y)
                     },
+                    scrollToMessageId = initialMessageId,
+                    onScrollToMessageHandled = onInitialMessageHandled,
                     modifier = Modifier.weight(1f),
                 )
                 }

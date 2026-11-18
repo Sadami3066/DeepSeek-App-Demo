@@ -4,7 +4,7 @@ import kotlin.math.roundToInt
 
 internal object ComposerLimits {
     const val MAX_INPUT_CHARS = 2_621_440
-    const val MAX_FILES_PER_SESSION = 20
+    const val MAX_FILES_PER_MESSAGE = 20
     const val MAX_FILE_BYTES = 100L * 1024 * 1024
     const val MAX_FILE_LABEL = "100MB"
 
@@ -16,9 +16,9 @@ internal object ComposerLimits {
         return "内容超长约 $percent%，请删减后再试"
     }
 
-    fun validateFileCount(sessionFileCount: Int, incomingCount: Int): String? =
-        if (sessionFileCount + incomingCount > MAX_FILES_PER_SESSION) {
-            "上传文件数达到上限，每个对话可上传 $MAX_FILES_PER_SESSION 个文件"
+    fun validateFileCount(incomingCount: Int): String? =
+        if (incomingCount > MAX_FILES_PER_MESSAGE) {
+            "单条消息最多上传 $MAX_FILES_PER_MESSAGE 个文件"
         } else {
             null
         }

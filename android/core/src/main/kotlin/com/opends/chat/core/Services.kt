@@ -34,6 +34,8 @@ interface SettingsStore {
 interface ArchiveService {
     suspend fun importZip(bytes: ByteArray): ImportResult
     suspend fun exportZip(): ByteArray
+    suspend fun importZipFile(file: java.io.File, displayName: String): ImportResult
+    suspend fun exportZipTo(out: java.io.OutputStream): Int
     suspend fun importFromOriginalApp(readSource: OriginalAppSource): ImportResult
 }
 

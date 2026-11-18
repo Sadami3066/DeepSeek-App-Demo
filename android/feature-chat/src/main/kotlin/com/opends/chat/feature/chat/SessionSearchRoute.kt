@@ -71,6 +71,7 @@ private val CoverGap = 11.4.dp
 
 private data class SessionSearchHit(
     val sessionId: String,
+    val messageId: Long?,
     val title: String,
     val snippet: String,
     val timestamp: Long,
@@ -81,7 +82,7 @@ private data class SessionSearchHit(
 @Composable
 fun SessionSearchRoute(
     onBack: () -> Unit,
-    onOpenSession: (String) -> Unit,
+    onOpenSession: (String, Long?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val palette = OdTheme.colors
@@ -210,13 +211,13 @@ fun SessionSearchRoute(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(top = 7.7.dp, bottom = 24.dp),
             ) {
-                items(hits, key = { it.sessionId + "-" + it.timestamp + "-" + it.matchStart }) { hit ->
+                items(hits, key = { it.sessionId + "-" + (it.messageId ?: -1L) + "-" + it.timestamp + "-" + it.matchStart }) { hit ->
                     SessionSearchRow(
                         hit = hit,
                         query = query.trim(),
                         onClick = {
                             focusManager.clearFocus()
-                            onOpenSession(hit.sessionId)
+                            onOpenSession(hit.sessionId, hit.messageId)
                         },
                     )
                 }
@@ -306,10 +307,9 @@ private fun SessionSearchRow(
 private suspend fun searchSessions(sessions: List<SessionInfo>, keyword: String): List<SessionSearchHit> {
     val hits = ArrayList<SessionSearchHit>()
     for (session in sessions) {
-        if (hits.size >= 60) break
         val title = session.title?.takeIf { it.isNotBlank() } ?: "新对话"
         val messages = runCatching { OpenDS.sessions.loadMessages(session.id) }.getOrDefault(emptyList())
-        for (message in messages.asReversed()) {
+        for (message in messages) {
             val text = searchableText(message)
             if (text.isBlank()) continue
             val index = text.indexOf(keyword, ignoreCase = true)
@@ -321,6 +321,7 @@ private suspend fun searchSessions(sessions: List<SessionInfo>, keyword: String)
             hits.add(
                 SessionSearchHit(
                     sessionId = session.id,
+                    messageId = message.id,
                     title = title,
                     snippet = snippet,
                     timestamp = message.insertedAt.takeIf { it > 0 } ?: session.updatedAt,
@@ -328,23 +329,28 @@ private suspend fun searchSessions(sessions: List<SessionInfo>, keyword: String)
                     matchEnd = matchStart + keyword.length,
                 ),
             )
-            if (hits.size >= 60) break
         }
-        if (hits.size < 60 && title.contains(keyword, ignoreCase = true)) {
-            hits.removeAll { it.sessionId == session.id }
+        val titleIndex = title.indexOf(keyword, ignoreCase = true)
+        if (titleIndex >= 0) {
             hits.add(
                 SessionSearchHit(
                     sessionId = session.id,
+                    messageId = null,
                     title = title,
                     snippet = title,
                     timestamp = session.updatedAt,
-                    matchStart = title.indexOf(keyword, ignoreCase = true).coerceAtLeast(0),
-                    matchEnd = title.indexOf(keyword, ignoreCase = true).coerceAtLeast(0) + keyword.length,
+                    matchStart = titleIndex,
+                    matchEnd = titleIndex + keyword.length,
                 ),
             )
         }
+        if (hits.size >= 240) break
     }
-    return hits
+    return hits.sortedWith(
+        compareByDescending<SessionSearchHit> { it.timestamp }
+            .thenBy { it.sessionId }
+            .thenBy { it.messageId ?: 0L },
+    ).take(60)
 }
 
 private fun searchableText(message: ChatMessage): String = message.fragments

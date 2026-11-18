@@ -158,35 +158,73 @@ internal object ArchiveJson {
         }
     }
 
+    internal data class ArchiveSessionImport(
+        val session: ImportedSession,
+        val skipped: Int,
+        val warnings: List<String>,
+    )
+
     fun importSession(json: JsonObject, expectedId: String): Pair<ImportedSession, Int> {
-        val id = json.string("id") ?: throw ArchiveException("文件内容不完整，无法导入")
-        if (id != expectedId) throw ArchiveException("文件内容不完整，无法导入")
+        val result = importSessionDetailed(json, expectedId)
+        return result.session to result.skipped
+    }
+
+    fun importSessionDetailed(json: JsonObject, expectedId: String): ArchiveSessionImport {
+        val id = json.string("id") ?: throw incompleteArchive()
+        if (id != expectedId) throw incompleteArchive()
         val title = json.string("title")
-        val currentRaw = json.number("current_message_id")?.toLong() ?: 0L
+        val currentRaw = json.number("current_message_id")?.toLong()
         val insertedAt = TimeFormats.parseMillis(json.string("inserted_at")) ?: 0L
         val updatedAt = TimeFormats.parseMillis(json.string("updated_at")) ?: insertedAt
-        val messagesArray = json.array("messages") ?: throw ArchiveException("文件内容不完整，无法导入")
-        val messages = ArrayList<ImportedMessage>(messagesArray.size())
+        val messagesArray = json.array("messages") ?: JsonArray()
+        val warnings = ArrayList<String>()
         var skipped = 0
-        val byId = LinkedHashMap<Long, ChatMessage>()
+
+        class RawNode(
+            val originalId: Long,
+            val declaredParentId: Long?,
+            val role: Role,
+            val statusRaw: String,
+            val status: MessageStatus,
+            val thinkingEnabled: Boolean,
+            val searchEnabled: Boolean,
+            val insertedAt: Long,
+            val canonicalJson: String,
+            val modelFragments: List<Fragment>,
+            val conversationMode: String?,
+        )
+
+        val nodes = LinkedHashMap<Long, RawNode>()
         messagesArray.forEach { element ->
-            if (!element.isJsonObject) throw ArchiveException("文件内容不完整，无法导入")
+            if (!element.isJsonObject) throw invalidBranches()
             val messageJson = element.asJsonObject
-            val rawId = messageJson.number("id")?.toLong() ?: throw ArchiveException("文件中的消息分支已损坏，无法导入")
-            val parentRaw = messageJson.number("parent_id")?.toLong()
+            val rawId = messageJson.number("id")?.toLong() ?: throw invalidBranches()
+            if (nodes.containsKey(rawId)) throw invalidBranches()
+            val declaredParent = messageJson.get("parent_id")?.let { parentElement ->
+                if (parentElement.isJsonNull) {
+                    null
+                } else {
+                    runCatching { parentElement.asLong }.getOrNull()
+                }
+            }
             val role = runCatching { Role.valueOf(messageJson.string("role") ?: "") }
-                .getOrElse { throw ArchiveException("文件中的消息分支已损坏，无法导入") }
+                .getOrElse { throw invalidBranches() }
             val statusRaw = messageJson.string("status").orEmpty()
             val status = archiveStatusToModel(statusRaw)
-            val parent = parentRaw?.let { byId[it] ?: throw ArchiveException("文件中的消息分支已损坏，无法导入") }
-            if (parentRaw == null && role != Role.USER) throw ArchiveException("文件中的消息分支已损坏，无法导入")
-            if (parent != null && parent.role == role) throw ArchiveException("文件中的消息分支已损坏，无法导入")
-            val thinkingEnabled = messageJson.get("thinking_enabled")?.let { runCatching { it.asBoolean }.getOrDefault(false) } ?: false
-            val searchEnabled = messageJson.get("search_enabled")?.let { runCatching { it.asBoolean }.getOrDefault(false) } ?: false
+            val thinkingEnabled = messageJson.get("thinking_enabled")?.let {
+                runCatching { it.asBoolean }.getOrDefault(false)
+            } ?: false
+            val searchEnabled = messageJson.get("search_enabled")?.let {
+                runCatching { it.asBoolean }.getOrDefault(false)
+            } ?: false
             val inserted = TimeFormats.parseMillis(messageJson.string("inserted_at")) ?: 0L
             val fragmentsArray = messageJson.array("fragments") ?: JsonArray()
-            val officialTypes = fragmentsArray.mapNotNull { element ->
-                if (element.isJsonObject) element.asJsonObject.get("type")?.let { runCatching { it.asString }.getOrNull() } else null
+            val officialTypes = fragmentsArray.mapNotNull { fragmentElement ->
+                if (fragmentElement.isJsonObject) {
+                    fragmentElement.asJsonObject.get("type")?.let { runCatching { it.asString }.getOrNull() }
+                } else {
+                    null
+                }
             }.toSet()
             val conversationMode = when (role) {
                 Role.USER -> "DEFAULT"
@@ -195,7 +233,6 @@ internal object ArchiveJson {
                 ) "DEEP_SEARCH" else "DEFAULT"
             }
             val fragments = ArrayList<JsonObject>(fragmentsArray.size())
-            var stopReason: String? = null
             when (role) {
                 Role.USER -> fragmentsArray.forEach { fragmentElement ->
                     if (!fragmentElement.isJsonObject) {
@@ -217,7 +254,6 @@ internal object ArchiveJson {
                             skipped += 1
                         }
                     }
-                    if (statusRaw == "CONTENT_FILTER") stopReason = "refusal"
                     val blocks = WireCodec.fromOfficialFragments(official, rawId)
                     fragments.addAll(WireCodec.canonical(filterRefused(blocks, statusRaw)))
                     if (statusRaw == "CONTENT_FILTER") {
@@ -228,39 +264,141 @@ internal object ArchiveJson {
                     }
                 }
             }
-            val canonicalJson = FragmentCodec.encode(fragments)
-            val message = ChatMessage(
-                id = rawId,
-                parentId = parent?.id,
+            nodes[rawId] = RawNode(
+                originalId = rawId,
+                declaredParentId = declaredParent,
                 role = role,
+                statusRaw = statusRaw,
                 status = status,
                 thinkingEnabled = thinkingEnabled,
                 searchEnabled = searchEnabled,
-                accumulatedTokenUsage = 0,
                 insertedAt = inserted,
-                prefix = false,
-                fragments = WireCodec.modelFragments(fragments, role),
+                canonicalJson = FragmentCodec.encode(fragments),
+                modelFragments = WireCodec.modelFragments(fragments, role),
                 conversationMode = conversationMode,
             )
-            messages.add(ImportedMessage(message, canonicalJson))
-            byId[rawId] = message
         }
-        val currentId = if (messages.isEmpty()) null else {
-            if (currentRaw <= 0L) messages.last().message.id else currentRaw
+
+        val parentOf = HashMap<Long, Long?>()
+        var repairedParents = 0
+        nodes.keys.forEach { rawId ->
+            val node = nodes.getValue(rawId)
+            val declared = node.declaredParentId
+            val resolved = when {
+                declared == null -> null
+                declared == rawId -> {
+                    repairedParents += 1
+                    null
+                }
+                nodes.containsKey(declared) -> declared
+                else -> {
+                    repairedParents += 1
+                    null
+                }
+            }
+            parentOf[rawId] = resolved
         }
-        if (currentId != null && !byId.containsKey(currentId)) {
-            throw ArchiveException("文件中的消息分支已损坏，无法导入")
+
+        var brokenCycles = 0
+        val chainVisited = HashSet<Long>(nodes.size)
+        nodes.keys.forEach { start ->
+            if (chainVisited.contains(start)) return@forEach
+            val chain = ArrayList<Long>()
+            val indexInChain = HashMap<Long, Int>()
+            var cursor: Long? = start
+            while (cursor != null) {
+                val current = cursor
+                val existing = indexInChain[current]
+                if (existing != null) {
+                    val cycle = chain.subList(existing, chain.size)
+                    val pivot = cycle.minOrNull()
+                    if (pivot != null) {
+                        parentOf[pivot] = null
+                        brokenCycles += 1
+                    }
+                    break
+                }
+                if (chainVisited.contains(current)) break
+                indexInChain[current] = chain.size
+                chain.add(current)
+                cursor = parentOf[current]
+            }
+            chainVisited.addAll(chain)
         }
-        return ImportedSession(
+
+        val childrenMap = HashMap<Long, MutableList<Long>>(nodes.size)
+        nodes.keys.forEach { rawId ->
+            parentOf[rawId]?.let { parent -> childrenMap.getOrPut(parent) { ArrayList() }.add(rawId) }
+        }
+        childrenMap.values.forEach { list -> list.sort() }
+        val ordered = ArrayList<Long>(nodes.size)
+        val visited = HashSet<Long>(nodes.size)
+        val stack = ArrayDeque<Long>()
+        nodes.keys.filter { parentOf[it] == null }.sorted().asReversed().forEach { stack.addLast(it) }
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (!visited.add(current)) continue
+            ordered.add(current)
+            childrenMap[current]?.asReversed()?.forEach { child -> stack.addLast(child) }
+        }
+
+        val newIds = HashMap<Long, Long>(ordered.size)
+        ordered.forEachIndexed { index, rawId -> newIds[rawId] = index + 1L }
+        val depthOf = HashMap<Long, Int>(ordered.size)
+        ordered.forEach { rawId ->
+            val parent = parentOf[rawId]
+            depthOf[rawId] = if (parent == null) 0 else (depthOf[parent] ?: 0) + 1
+        }
+        val currentRawValid = currentRaw != null && nodes.containsKey(currentRaw)
+        val fallbackLeaf = nodes.keys
+            .filter { rawId -> childrenMap[rawId].isNullOrEmpty() }
+            .maxWithOrNull(compareBy<Long> { depthOf[it] ?: 0 }.thenBy { it })
+        val newCurrentMessageId = when {
+            nodes.isEmpty() -> null
+            currentRawValid -> newIds[currentRaw]
+            else -> {
+                warnings.add("当前消息不存在，已回退到最近的消息")
+                fallbackLeaf?.let { newIds[it] }
+            }
+        }
+        if (repairedParents > 0) warnings.add(0, "修复了 $repairedParents 条缺失的父消息引用")
+        if (brokenCycles > 0) warnings.add("修复了 $brokenCycles 条循环引用")
+
+        val imported = ArrayList<ImportedMessage>(ordered.size)
+        ordered.forEach { rawId ->
+            val node = nodes.getValue(rawId)
+            val newId = newIds.getValue(rawId)
+            val newParentId = parentOf[rawId]?.let { newIds[it] }
+            val message = ChatMessage(
+                id = newId,
+                parentId = newParentId,
+                role = node.role,
+                status = node.status,
+                thinkingEnabled = node.thinkingEnabled,
+                searchEnabled = node.searchEnabled,
+                accumulatedTokenUsage = 0,
+                insertedAt = node.insertedAt,
+                prefix = false,
+                fragments = node.modelFragments,
+                conversationMode = node.conversationMode,
+            )
+            imported.add(ImportedMessage(message, node.canonicalJson))
+        }
+        val session = ImportedSession(
             id = id,
             title = title?.takeIf { it.isNotEmpty() },
             pinned = false,
-            currentMessageId = currentId,
+            currentMessageId = newCurrentMessageId,
             insertedAt = insertedAt,
             updatedAt = updatedAt,
-            messages = messages,
-        ) to skipped
+            messages = imported,
+        )
+        return ArchiveSessionImport(session = session, skipped = skipped, warnings = warnings)
     }
+
+    private fun incompleteArchive(): ArchiveException = ArchiveException("文件内容不完整，无法导入")
+
+    private fun invalidBranches(): ArchiveException = ArchiveException("文件中的消息分支已损坏，无法导入")
 
     private fun filterRefused(blocks: List<WireBlock>, statusRaw: String): List<WireBlock> {
         if (statusRaw != "CONTENT_FILTER") return blocks

@@ -1,5 +1,7 @@
 package com.opends.chat.feature.shell
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.opends.chat.core.AppSettings
+import com.opends.chat.core.ErrorLog
 import com.opends.chat.core.ImportResult
 import com.opends.chat.core.OpenDSApi
 import com.opends.chat.core.OriginalAppSource
@@ -58,14 +61,16 @@ import com.opends.chat.design.theme.OdMotion
 import com.opends.chat.design.theme.OdTheme
 import com.opends.chat.design.theme.OdType
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class SettingsPage { HOME, DATA, FONT_SIZE, PERSONALIZATION, AGREEMENT }
+private enum class SettingsPage { HOME, DATA, FONT_SIZE, PERSONALIZATION, AGREEMENT, ERROR_LOG }
 private enum class SettingsDialog { NONE, LANGUAGE, APPEARANCE }
 
 @Composable
@@ -125,40 +130,63 @@ fun SettingsRoute(onBack: () -> Unit) {
     fun importAny(uri: Uri) {
         scope.launch {
             busyText = strings.processing
+            val name = uriFileName(context, uri)
+            val workDir = java.io.File(context.cacheDir, "imports").apply { mkdirs() }
+            val tempFile = java.io.File(workDir, "import-${System.nanoTime()}")
+            var size = 0L
             try {
-                val bytes = readUriBytes(context, uri) ?: error(strings.importFailed)
-                val name = uriFileName(context, uri)
-                val result = when (detectImportKind(name, bytes)) {
-                    ImportKind.ZIP -> archive?.importZip(bytes) ?: error(strings.importFailed)
+                copyUriToFile(context, uri, tempFile) ?: error(strings.importFailed)
+                size = tempFile.length()
+                val header = readFileHeader(tempFile)
+                val result = when (detectImportKind(name, header)) {
+                    ImportKind.ZIP -> archive?.importZipFile(tempFile, name) ?: error(strings.importFailed)
                     ImportKind.DATABASE -> archive
-                        ?.importFromOriginalApp(OriginalAppSource.DatabaseBytes(name, bytes))
+                        ?.importFromOriginalApp(OriginalAppSource.DatabaseBytes(name, tempFile.readBytes()))
                         ?: error(strings.importFailed)
                     null -> null
                 }
                 if (result == null) {
+                    ErrorLog.record(
+                        "导入",
+                        "无法识别导入文件：$name",
+                        "size=$size header=${header.joinToString(",")}",
+                    )
                     toast.show(strings.importFailed, true)
                 } else {
                     toast.show(importMessage(result))
                 }
             } catch (error: Throwable) {
-                toast.show(strings.importFailed, true)
+                ErrorLog.record("导入", "导入失败：$name", "size=$size", error)
+                toast.show(strings.importFailedReason(OpenDSApi.describeError(error)), true)
             } finally {
+                runCatching { tempFile.delete() }
                 busyText = null
             }
         }
+    }
+
+    fun copyErrorLog() {
+        runCatching {
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+            clipboard?.setPrimaryClip(ClipData.newPlainText("DeepFish error log", ErrorLog.text()))
+        }
+        toast.show(strings.copied)
     }
 
     fun exportTo(uri: Uri) {
         scope.launch {
             busyText = strings.processing
             try {
-                val bytes = archive?.exportZip() ?: error(strings.exportFailed)
-                if (!writeUriBytes(context, uri, bytes)) {
-                    error(strings.exportFailed)
+                val service = archive ?: error(strings.exportFailed)
+                withContext(Dispatchers.IO) {
+                    val stream = context.contentResolver.openOutputStream(uri)
+                        ?: throw IllegalStateException(strings.exportFailed)
+                    stream.use { out -> service.exportZipTo(out) }
                 }
                 toast.show(strings.exportSuccess)
             } catch (error: Throwable) {
-                toast.show(strings.exportFailedReason(describeError(error)), true)
+                ErrorLog.record("导出", "导出失败", null, error)
+                toast.show(strings.exportFailedReason(OpenDSApi.describeError(error)), true)
             } finally {
                 busyText = null
             }
@@ -323,6 +351,7 @@ fun SettingsRoute(onBack: () -> Unit) {
                     onOpenVoice = { voiceSheetVisible = true },
                     onCheckUpdate = { launchUpdateCheck(manual = true) },
                     onOpenAgreement = { pageName = SettingsPage.AGREEMENT.name },
+                    onOpenErrorLog = { pageName = SettingsPage.ERROR_LOG.name },
                 )
 
                 SettingsPage.DATA -> DataManagementPage(
@@ -357,6 +386,16 @@ fun SettingsRoute(onBack: () -> Unit) {
 
                 SettingsPage.AGREEMENT -> AgreementPage(
                     strings = strings,
+                    onBack = { pageName = SettingsPage.HOME.name },
+                )
+
+                SettingsPage.ERROR_LOG -> ErrorLogPage(
+                    strings = strings,
+                    onCopy = { copyErrorLog() },
+                    onClear = {
+                        ErrorLog.clear()
+                        toast.show(strings.logCleared)
+                    },
                     onBack = { pageName = SettingsPage.HOME.name },
                 )
 
@@ -545,6 +584,7 @@ private fun SettingsHome(
     onOpenVoice: () -> Unit,
     onCheckUpdate: () -> Unit,
     onOpenAgreement: () -> Unit,
+    onOpenErrorLog: () -> Unit,
 ) {
     val colors = OdTheme.colors
     Column(
@@ -649,6 +689,11 @@ private fun SettingsHome(
                     title = strings.usageAgreement,
                     icon = { SettingsRowIcon(R.drawable.ic_list_pen_regular) },
                     onClick = onOpenAgreement,
+                )
+                SettingsRow(
+                    title = strings.errorLog,
+                    icon = { SettingsRowIcon(R.drawable.ic_data_regular) },
+                    onClick = onOpenErrorLog,
                 )
             }
             Column(

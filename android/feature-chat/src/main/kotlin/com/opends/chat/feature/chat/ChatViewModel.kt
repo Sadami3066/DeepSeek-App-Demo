@@ -8,8 +8,10 @@ import androidx.lifecycle.viewModelScope
 import com.opends.chat.core.AppSettings
 import com.opends.chat.core.AttachmentRef
 import com.opends.chat.core.ChatMessage
+import com.opends.chat.core.ErrorLog
 import com.opends.chat.core.GenerationState
 import com.opends.chat.core.OpenDS
+import com.opends.chat.core.OpenDSApi
 import com.opends.chat.core.Role
 import com.opends.chat.core.SendInput
 import com.opends.chat.core.SessionInfo
@@ -457,6 +459,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun revealMessage(sessionId: String, messageId: Long) {
+        requestScope.launch {
+            val all = runCatching { OpenDS.sessions.loadMessages(sessionId) }.getOrElse { return@launch }
+            if (all.none { it.id == messageId }) return@launch
+            var cursor = messageId
+            val visited = HashSet<Long>()
+            while (visited.add(cursor)) {
+                val next = all.filter { it.parentId == cursor }.maxByOrNull { it.id } ?: break
+                cursor = next.id
+            }
+            runCatching { OpenDS.sessions.setCurrentMessage(sessionId, cursor) }
+        }
+    }
+
     fun cancelTranscription() {
         transcribeJob?.cancel()
         transcribeJob = null
@@ -558,6 +574,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun describeError(error: Throwable): String {
+        val official = runCatching { OpenDSApi.describeError(error) }.getOrNull().orEmpty()
+        val resolved = if (official.isNotBlank()) official else fallbackDescribe(error)
+        ErrorLog.record("对话", resolved, null, error)
+        return resolved
+    }
+
+    private fun fallbackDescribe(error: Throwable): String {
         val message = error.message.orEmpty()
         val known = when {
             message.contains("401") || message.contains("API Key", ignoreCase = true) || message.contains("invalid_api_key") ->

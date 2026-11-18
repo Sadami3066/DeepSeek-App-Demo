@@ -39,11 +39,13 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.opends.chat.core.ErrorLog
 import com.opends.chat.design.R
 import com.opends.chat.design.theme.OdDimens
 import com.opends.chat.design.theme.OdTheme
@@ -446,5 +448,61 @@ internal fun ApiKeyDialog(
                 )
             }
         }
+    }
+}
+
+@Composable
+internal fun ErrorLogPage(
+    strings: ShellStrings,
+    onCopy: (String) -> Unit,
+    onClear: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val colors = OdTheme.colors
+    var text by remember { mutableStateOf(ErrorLog.text()) }
+    var empty by remember { mutableStateOf(ErrorLog.isEmpty()) }
+    SettingsSubPage(title = strings.errorLog, onBack = onBack) {
+        Text(
+            text = strings.errorLogDesc,
+            modifier = Modifier.padding(horizontal = DescStartPadding, vertical = 4.dp),
+            fontSize = 13.sp,
+            lineHeight = 19.sp,
+            color = colors.labelTertiary,
+        )
+        Spacer(Modifier.height(12.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(15.dp))
+                .background(colors.menu)
+                .padding(14.dp),
+        ) {
+            Text(
+                text = if (empty) strings.errorLogEmpty else text,
+                fontFamily = if (empty) FontFamily.Default else FontFamily.Monospace,
+                fontSize = if (empty) 14.sp else 11.sp,
+                lineHeight = if (empty) 20.sp else 16.sp,
+                color = if (empty) colors.labelTertiary else colors.labelSecondary,
+            )
+        }
+        Spacer(Modifier.height(SubPageCardGap))
+        SettingsCard {
+            SettingsRow(
+                title = strings.copyAll,
+                showChevron = false,
+                onClick = { onCopy(ErrorLog.text()) },
+            )
+            SettingsHairline(colors.divider)
+            SettingsRow(
+                title = strings.clearLog,
+                showChevron = false,
+                onClick = {
+                    onClear()
+                    text = ErrorLog.text()
+                    empty = ErrorLog.isEmpty()
+                },
+            )
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }

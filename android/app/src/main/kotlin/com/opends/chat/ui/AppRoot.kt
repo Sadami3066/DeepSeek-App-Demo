@@ -104,12 +104,21 @@ private fun AppShell() {
     var showSettings by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
     var siderOpen by remember { mutableStateOf(false) }
+    var pendingSessionId by remember { mutableStateOf<String?>(null) }
+    var pendingMessageId by remember { mutableStateOf<Long?>(null) }
 
     BackHandler(enabled = showSettings || showSearch || siderOpen) {
         when {
             siderOpen -> siderOpen = false
             showSearch -> showSearch = false
             showSettings -> showSettings = false
+        }
+    }
+
+    LaunchedEffect(sessionId) {
+        if (pendingSessionId != null && pendingSessionId != sessionId) {
+            pendingSessionId = null
+            pendingMessageId = null
         }
     }
 
@@ -258,8 +267,15 @@ private fun AppShell() {
                     showSettings -> SettingsRoute(onBack = { showSettings = false })
                     showSearch -> SessionSearchRoute(
                         onBack = { showSearch = false },
-                        onOpenSession = {
-                            sessionId = it
+                        onOpenSession = { searchSessionId, searchMessageId ->
+                            sessionId = searchSessionId
+                            if (searchMessageId == null) {
+                                pendingSessionId = null
+                                pendingMessageId = null
+                            } else {
+                                pendingSessionId = searchSessionId
+                                pendingMessageId = searchMessageId
+                            }
                             showSearch = false
                         },
                     )
@@ -268,6 +284,11 @@ private fun AppShell() {
                         onSessionCreated = { sessionId = it },
                         onOpenSider = { siderOpen = true },
                         onOpenSettings = { showSettings = true },
+                        initialMessageId = pendingMessageId.takeIf { pendingSessionId == sessionId },
+                        onInitialMessageHandled = {
+                            pendingSessionId = null
+                            pendingMessageId = null
+                        },
                     )
                 }
                 if (dark) {

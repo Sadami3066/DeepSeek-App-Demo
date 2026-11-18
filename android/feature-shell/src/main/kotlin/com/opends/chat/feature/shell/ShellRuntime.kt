@@ -57,20 +57,6 @@ internal fun openExternalUrl(context: Context, url: String): Boolean = runCatchi
     true
 }.getOrDefault(false)
 
-internal suspend fun readUriBytes(context: Context, uri: Uri): ByteArray? =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-    }
-
-internal suspend fun writeUriBytes(context: Context, uri: Uri, bytes: ByteArray): Boolean =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) } != null
-        }.getOrDefault(false)
-    }
-
 internal fun uriFileName(context: Context, uri: Uri): String =
     runCatching {
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -110,5 +96,28 @@ internal fun detectImportKind(fileName: String, bytes: ByteArray): ImportKind? {
     }
 }
 
-internal fun describeError(error: Throwable): String =
-    error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+internal suspend fun copyUriToFile(context: Context, uri: Uri, target: java.io.File): java.io.File? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val input = context.contentResolver.openInputStream(uri) ?: return@runCatching null
+            input.use { source ->
+                target.parentFile?.mkdirs()
+                target.outputStream().use { sink -> source.copyTo(sink) }
+            }
+            if (target.length() > 0L) target else null
+        }.getOrNull()
+    }
+
+internal fun readFileHeader(file: java.io.File, size: Int = 16): ByteArray =
+    runCatching {
+        file.inputStream().use { input ->
+            val buffer = ByteArray(size)
+            var read = 0
+            while (read < size) {
+                val count = input.read(buffer, read, size - read)
+                if (count < 0) break
+                read += count
+            }
+            if (read == size) buffer else buffer.copyOf(read)
+        }
+    }.getOrDefault(ByteArray(0))

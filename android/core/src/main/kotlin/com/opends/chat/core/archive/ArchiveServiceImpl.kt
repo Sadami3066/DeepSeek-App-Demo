@@ -2,12 +2,11 @@ package com.opends.chat.core.archive
 
 import android.content.Context
 import com.google.gson.JsonArray
-import com.google.gson.JsonNull
 import com.google.gson.JsonObject
-import com.opends.chat.core.ImportResult
 import com.opends.chat.core.ArchiveService
+import com.opends.chat.core.ErrorLog
+import com.opends.chat.core.ImportResult
 import com.opends.chat.core.OriginalAppSource
-import com.opends.chat.core.SessionInfo
 import com.opends.chat.core.attach.AttachmentStoreImpl
 import com.opends.chat.core.db.SessionStoreImpl
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +16,7 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.apache.commons.compress.archivers.zip.Zip64Mode
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStream
 
 internal class ArchiveServiceImpl(
     context: Context,
@@ -26,15 +26,43 @@ internal class ArchiveServiceImpl(
 
     private val cacheDir = File(context.applicationContext.cacheDir, "imports").apply { mkdirs() }
 
+    override suspend fun importZipFile(file: File, displayName: String): ImportResult =
+        withContext(Dispatchers.IO) {
+            val size = runCatching { file.length() }.getOrDefault(0L)
+            val header = readHeader(file)
+            val source = try {
+                ArchiveZipSource.open(file)
+            } catch (error: Throwable) {
+                recordFailure(displayName, size, header, error)
+                throw error
+            }
+            runImport(source, displayName, size, header)
+        }
+
     override suspend fun importZip(bytes: ByteArray): ImportResult = withContext(Dispatchers.IO) {
-        val importRoot = File(cacheDir, "import").apply { mkdirs() }
-        ArchiveZipSource.open(bytes, cacheDir).use { source ->
-            val inspection = ArchiveZipImport.inspect(source)
-            val tempImages = File(importRoot, "images-${System.nanoTime()}").apply { mkdirs() }
+        val header = bytes.copyOf(minOf(4, bytes.size))
+        val source = try {
+            ArchiveZipSource.open(bytes, cacheDir)
+        } catch (error: Throwable) {
+            recordFailure("zip-bytes", bytes.size.toLong(), header, error)
+            throw error
+        }
+        runImport(source, "zip-bytes", bytes.size.toLong(), header)
+    }
+
+    private suspend fun runImport(
+        source: ArchiveZipSource,
+        displayName: String,
+        size: Long,
+        header: ByteArray,
+    ): ImportResult = source.use { zipSource ->
+        try {
+            val inspection = ArchiveZipImport.inspect(zipSource)
+            val tempImages = File(cacheDir, "images-${System.nanoTime()}").apply { mkdirs() }
             try {
                 store.replaceAllStreaming { sink ->
                     ArchiveZipImport.copy(
-                        source = source,
+                        source = zipSource,
                         inspection = inspection,
                         onSession = { session -> sink.insert(session) },
                         onImage = { fileId, imageBytes -> File(tempImages, fileId).writeBytes(imageBytes) },
@@ -47,6 +75,13 @@ internal class ArchiveServiceImpl(
                         savedImages += 1
                     }
                 }
+                if (inspection.warnings.isNotEmpty()) {
+                    ErrorLog.record(
+                        category = "导入",
+                        summary = "导入完成，存在兼容处理：$displayName",
+                        detail = inspection.warnings.joinToString("；"),
+                    )
+                }
                 ImportResult(
                     sessions = inspection.sessions,
                     messages = inspection.messages,
@@ -57,13 +92,17 @@ internal class ArchiveServiceImpl(
             } finally {
                 runCatching { tempImages.deleteRecursively() }
             }
+        } catch (error: Throwable) {
+            recordFailure(displayName, size, header, error)
+            if (error is ArchiveException) throw error
+            throw ArchiveException("导入失败：${error.message ?: "文件内容不完整，无法导入"}")
         }
     }
 
-    override suspend fun exportZip(): ByteArray = withContext(Dispatchers.IO) {
+    override suspend fun exportZipTo(out: OutputStream): Int = withContext(Dispatchers.IO) {
         val sessions = store.loadSessionsNow()
-        val output = ByteArrayOutputStream()
-        ZipArchiveOutputStream(output).use { zip ->
+        var imageCount = 0
+        ZipArchiveOutputStream(out).use { zip ->
             zip.setEncoding("UTF-8")
             zip.setUseLanguageEncodingFlag(true)
             zip.setUseZip64(Zip64Mode.Never)
@@ -83,12 +122,19 @@ internal class ArchiveServiceImpl(
                     val local = image.localPath?.let { File(it) } ?: attachments.localFile(image.fileId)
                     if (local != null && local.exists() && local.isFile) {
                         writeEntry(zip, image.path, local.readBytes())
+                        imageCount += 1
                     }
                 }
                 indexEntries.add(ArchiveJson.indexEntry(session, stored.size))
             }
             writeEntry(zip, INDEX_JSON, indexEntries.toString().toByteArray(Charsets.UTF_8))
         }
+        imageCount
+    }
+
+    override suspend fun exportZip(): ByteArray = withContext(Dispatchers.IO) {
+        val output = ByteArrayOutputStream()
+        exportZipTo(output)
         output.toByteArray()
     }
 
@@ -111,6 +157,24 @@ internal class ArchiveServiceImpl(
         )
     }
 
+    private fun readHeader(file: File): ByteArray = runCatching {
+        file.inputStream().use { input ->
+            val buffer = ByteArray(4)
+            val read = input.read(buffer)
+            if (read <= 0) ByteArray(0) else buffer.copyOf(read)
+        }
+    }.getOrDefault(ByteArray(0))
+
+    private fun recordFailure(displayName: String, size: Long, header: ByteArray, error: Throwable) {
+        val headerText = if (header.isEmpty()) "空" else header.joinToString(" ") { byte -> "%02X".format(byte) }
+        ErrorLog.record(
+            category = "导入",
+            summary = "导入失败：$displayName",
+            detail = "大小=$size 字节，文件头=$headerText",
+            error = error,
+        )
+    }
+
     private fun writeEntry(zip: ZipArchiveOutputStream, path: String, bytes: ByteArray) {
         val entry = ZipArchiveEntry(path)
         entry.time = FIXED_TIME
@@ -122,7 +186,6 @@ internal class ArchiveServiceImpl(
     companion object {
         private const val MANIFEST = "manifest.json"
         private const val INDEX_JSON = "chat_session_index.json"
-        private const val USER_JSON = "user.json"
         private const val FIXED_TIME = 315532800000L
     }
 }
