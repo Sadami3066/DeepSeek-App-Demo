@@ -4,7 +4,6 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import android.media.PlaybackParams
 import com.opends.chat.core.VoiceService
 import com.opends.chat.core.net.ApiErrorKind
 import com.opends.chat.core.net.ApiCondition
@@ -50,14 +49,14 @@ internal class VoiceServiceImpl(
             speaking = true
         }
         speakingState.value = true
+        // 只有两个原生音色，播放链路不做任何变调/变速处理。
         val profile = VoiceProfiles.byId(voiceId ?: settings.state.value.ttsVoice)
-        val chunks = splitText(plain)
         try {
-            chunks.forEachIndexed { index, chunk ->
+            player.start()
+            splitText(plain).forEach { chunk ->
                 synchronized(playerLock) {
                     if (!speaking) return@withContext
                 }
-                if (index == 0) player.start(profile.pitch, profile.speed)
                 wire.synthesize(chunk, profile.apiVoiceId) { bytes ->
                     if (speaking) player.write(bytes)
                 }
@@ -107,24 +106,17 @@ internal class VoiceServiceImpl(
         private var track: AudioTrack? = null
         private var remainder: ByteArray = ByteArray(0)
         private var writtenBytes: Long = 0L
-        private var speed: Float = 1.0f
         private val released = AtomicBoolean(false)
 
-        fun start(pitch: Float, speed: Float) {
+        fun start() {
             released.set(false)
             remainder = ByteArray(0)
             writtenBytes = 0L
-            this.speed = speed.coerceAtLeast(0.1f)
             val minBuffer = AudioTrack.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
             ).coerceAtLeast(FRAME_BYTES * 4)
-            val bufferSize = maxOf(
-                minBuffer,
-                FRAME_BYTES * 4,
-                (minBuffer * maxOf(1f, this.speed) * 1.2f).toInt(),
-            )
             val created = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -140,21 +132,14 @@ internal class VoiceServiceImpl(
                         .build()
                 )
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(bufferSize)
+                .setBufferSizeInBytes(maxOf(minBuffer, FRAME_BYTES * 4))
                 .build()
+            if (created.state != AudioTrack.STATE_INITIALIZED) {
+                created.release()
+                throw ApiException.protocol("朗读播放器初始化失败")
+            }
             created.play()
             track = created
-            applyPlaybackParams(created, pitch, speed)
-        }
-
-        private fun applyPlaybackParams(created: AudioTrack, pitch: Float, speed: Float) {
-            if (pitch == 1.0f && speed == 1.0f) return
-            val params = PlaybackParams()
-                .allowDefaults()
-                .setPitch(VoiceProfiles.safePitch(pitch))
-                .setSpeed(VoiceProfiles.safeSpeed(speed))
-                .setAudioFallbackMode(PlaybackParams.AUDIO_FALLBACK_MODE_FAIL)
-            runCatching { created.setPlaybackParams(params) }
         }
 
         fun write(bytes: ByteArray) {
@@ -179,7 +164,7 @@ internal class VoiceServiceImpl(
 
         fun drain() {
             val target = track ?: return
-            val estimatedMillis = (writtenBytes / 48.0 / speed).toLong()
+            val estimatedMillis = (writtenBytes / 48.0).toLong()
             val deadline = System.currentTimeMillis() + estimatedMillis + 120_000L
             while (writtenBytes > 0 && System.currentTimeMillis() < deadline) {
                 val played = runCatching { target.playbackHeadPosition.toLong() * 2 }.getOrDefault(0L)
