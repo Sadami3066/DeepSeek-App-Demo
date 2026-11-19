@@ -1,58 +1,38 @@
 package com.opends.chat.core.voice
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceProfilesTest {
 
     @Test
-    fun mapsFourVoiceIdsToApiVoicesAndPlaybackParams() {
-        val beike = VoiceProfiles.byId("mira")
-        assertEquals("stella", beike.apiVoiceId)
-        assertEquals(1.06f, beike.pitch, 0.0001f)
-        assertEquals(0.97f, beike.speed, 0.0001f)
-
-        val bailang = VoiceProfiles.byId("echo")
-        assertEquals("tide", bailang.apiVoiceId)
-        assertEquals(1.10f, bailang.pitch, 0.0001f)
-        assertEquals(1.02f, bailang.speed, 0.0001f)
-
-        val haixing = VoiceProfiles.byId("stella")
-        assertEquals("stella", haixing.apiVoiceId)
-        assertEquals(1.0f, haixing.pitch, 0.0001f)
-        assertEquals(1.0f, haixing.speed, 0.0001f)
-
-        val anchao = VoiceProfiles.byId("tide")
-        assertEquals("tide", anchao.apiVoiceId)
-        assertEquals(1.0f, anchao.pitch, 0.0001f)
-        assertEquals(1.0f, anchao.speed, 0.0001f)
+    fun onlyTwoNativeVoicesRemain() {
+        assertEquals(2, VoiceProfiles.all.size)
+        assertEquals("stella", VoiceProfiles.haixing.apiVoiceId)
+        assertEquals("tide", VoiceProfiles.anchao.apiVoiceId)
     }
 
     @Test
-    fun supportsLegacyIdsAndDisplayIds() {
-        assertEquals(VoiceProfiles.beike, VoiceProfiles.byId("beike"))
-        assertEquals(VoiceProfiles.bailang, VoiceProfiles.byId("bailang"))
-        assertEquals(VoiceProfiles.haixing, VoiceProfiles.byId("haixing"))
-        assertEquals(VoiceProfiles.anchao, VoiceProfiles.byId("anchao"))
-        assertEquals(VoiceProfiles.haixing, VoiceProfiles.byId(null))
-        assertEquals(VoiceProfiles.haixing, VoiceProfiles.byId("unknown"))
+    fun mapsDisplayIdsToApiVoices() {
+        assertEquals("stella", VoiceProfiles.byId("stella").apiVoiceId)
+        assertEquals("tide", VoiceProfiles.byId("tide").apiVoiceId)
+        assertEquals("stella", VoiceProfiles.byId("haixing").apiVoiceId)
+        assertEquals("tide", VoiceProfiles.byId("anchao").apiVoiceId)
     }
 
     @Test
-    fun clampsPlaybackParamsToSafeRanges() {
-        assertEquals(1.10f, VoiceProfiles.safePitch(2.0f), 0.0001f)
-        assertEquals(0.90f, VoiceProfiles.safePitch(0.2f), 0.0001f)
-        assertEquals(1.05f, VoiceProfiles.safeSpeed(3.0f), 0.0001f)
-        assertEquals(0.95f, VoiceProfiles.safeSpeed(0.1f), 0.0001f)
+    fun retiredVoicesFallBackToTheirBaseVoice() {
+        // 贝壳曾是 stella 变调，白浪曾是 tide 变调；下线后读到旧值也要能出声
+        assertEquals("stella", VoiceProfiles.byId("mira").apiVoiceId)
+        assertEquals("stella", VoiceProfiles.byId("beike").apiVoiceId)
+        assertEquals("tide", VoiceProfiles.byId("echo").apiVoiceId)
+        assertEquals("tide", VoiceProfiles.byId("bailang").apiVoiceId)
     }
 
     @Test
-    fun onlyVariantVoicesNeedPlaybackProcessing() {
-        assertFalse(VoiceProfiles.needsProcessing(VoiceProfiles.haixing))
-        assertFalse(VoiceProfiles.needsProcessing(VoiceProfiles.anchao))
-        assertTrue(VoiceProfiles.needsProcessing(VoiceProfiles.beike))
-        assertTrue(VoiceProfiles.needsProcessing(VoiceProfiles.bailang))
+    fun unknownAndNullDefaultToStella() {
+        assertEquals("stella", VoiceProfiles.byId(null).apiVoiceId)
+        assertEquals("stella", VoiceProfiles.byId("unknown").apiVoiceId)
+        assertEquals("stella", VoiceProfiles.byId("  ").apiVoiceId)
     }
 }

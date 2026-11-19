@@ -24,8 +24,8 @@ import kotlin.math.min
 import kotlin.math.sin
 
 object OdVoicePalettes {
+    /** 兜底色板（无音色时使用），沿用原「贝壳」的蓝调 */
     val mira: List<Color> = listOf(Color(0xFFE9F7FF), Color(0xFFA1D0F5), Color(0xFF698FD5))
-    val echo: List<Color> = listOf(Color(0xFFC8DBFF), Color(0xFF88ADF2), Color(0xFF4B59B3))
     val stella: List<Color> = listOf(Color(0xFFFFE8CD), Color(0xFFFFE19E), Color(0xFFF7C15E))
     val tide: List<Color> = listOf(Color(0xFFB4D1D9), Color(0xFF59889B), Color(0xFF4F6478))
 }

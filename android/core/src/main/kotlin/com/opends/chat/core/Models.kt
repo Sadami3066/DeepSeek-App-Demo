@@ -115,7 +115,7 @@ data class AppSettings(
     val apiBaseUrl: String = "https://api.deepseek.com",
     val theme: ThemeMode = ThemeMode.SYSTEM,
     val languageTag: String = "zh-CN",
-    val ttsVoice: String = "mira",
+    val ttsVoice: String = "stella",
     val locationEnabled: Boolean = false,
     val location: String? = null,
     val thinkingDefault: Boolean = true,

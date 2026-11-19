@@ -672,6 +672,10 @@ private fun SettingsHome(
                 SettingsRow(
                     title = strings.voiceName,
                     icon = { SettingsRowIcon(R.drawable.ic_voice_outline_26, 22.dp) },
+                    value = ShellVoices
+                        .firstOrNull { it.voiceId == settings.ttsVoice }
+                        ?.nameOf(strings)
+                        .orEmpty(),
                     onClick = onOpenVoice,
                 )
             }

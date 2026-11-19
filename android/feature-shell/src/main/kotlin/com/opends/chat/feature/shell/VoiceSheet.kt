@@ -39,19 +39,12 @@ internal data class ShellVoice(
     val palette: List<Color>,
 )
 
+/*
+ * 只保留官方 TTS 的两个原生音色：
+ *   海星 = stella（女声） / 暗潮 = tide（男声）
+ * 「贝壳」「白浪」是靠变调伪造出来的，部分设备会整轨无声，已下线。
+ */
 internal val ShellVoices = listOf(
-    ShellVoice(
-        voiceId = "mira",
-        nameOf = { it.voiceMira },
-        descOf = { it.voiceMiraDesc },
-        palette = OdVoicePalettes.mira,
-    ),
-    ShellVoice(
-        voiceId = "echo",
-        nameOf = { it.voiceEcho },
-        descOf = { it.voiceEchoDesc },
-        palette = OdVoicePalettes.echo,
-    ),
     ShellVoice(
         voiceId = "stella",
         nameOf = { it.voiceStella },
